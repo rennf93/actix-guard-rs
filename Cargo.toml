@@ -1,13 +1,13 @@
 [package]
-name = "actix-guard"
+name = "actix-guard-rs"
 version = "0.0.1"
 edition = "2024"
 description = "Application-layer security middleware for actix-web. Part of the guard ecosystem. WIP."
 license = "MIT"
-repository = "https://github.com/rennf93/actix-guard"
+repository = "https://github.com/rennf93/actix-guard-rs"
 readme = "README.md"
 keywords = ["security", "middleware", "api"]
 categories = ["web-programming"]
 
 [lib]
-name = "actix_guard"
+name = "actix_guard_rs"

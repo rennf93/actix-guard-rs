@@ -1,4 +1,4 @@
-# actix-guard
+# actix-guard-rs
 
 Application-layer security middleware for [actix-web](https://github.com/actix/actix-web). Part of the [guard ecosystem](https://github.com/rennf93).
 
