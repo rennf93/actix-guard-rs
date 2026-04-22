@@ -1,0 +1,70 @@
+"area: middleware":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/lib.rs
+          - src/middleware.rs
+          - src/middleware/**
+          - actix-guard-rs/src/lib.rs
+          - actix-guard-rs/src/middleware.rs
+          - actix-guard-rs/src/middleware/**
+
+"area: extractors":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/extractors.rs
+          - src/extractors/**
+          - actix-guard-rs/src/extractors.rs
+          - actix-guard-rs/src/extractors/**
+
+"area: types":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/types.rs
+          - src/types/**
+          - actix-guard-rs/src/types.rs
+          - actix-guard-rs/src/types/**
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - tests/**
+          - actix-guard-rs/tests/**
+
+examples:
+  - changed-files:
+      - any-glob-to-any-file:
+          - examples/**
+          - actix-guard-rs/examples/**
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - docs/**
+          - README.md
+          - CHANGELOG.md
+          - CONTRIBUTING.md
+          - SECURITY.md
+          - CODE_OF_CONDUCT.md
+          - LICENSE
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+          - .pre-commit-config.yaml
+
+build:
+  - changed-files:
+      - any-glob-to-any-file:
+          - Makefile
+          - Dockerfile
+          - compose.yml
+          - rustfmt.toml
+          - deny.toml
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - Cargo.toml
+          - Cargo.lock
+          - actix-guard-rs/Cargo.toml
