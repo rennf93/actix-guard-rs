@@ -1,34 +1,22 @@
-- name: "area: middleware"
+- name: "area: lib"
   color: "0E8A16"
-  description: "Touches the actix-web middleware adapter (src/lib.rs or src/middleware/)"
-
-- name: "area: extractors"
-  color: "0E8A16"
-  description: "Touches actix extractor implementations"
-
-- name: "area: types"
-  color: "0E8A16"
-  description: "Touches request/response/config type wrappers"
+  description: "Touches src/ (actix-web adapter — currently a single-file lib stub)"
 
 - name: tests
   color: "FBCA04"
   description: "Test suite changes"
 
-- name: examples
-  color: "C5DEF5"
-  description: "examples/ binaries"
-
 - name: documentation
   color: "0075CA"
-  description: "Docs, README, CHANGELOG, governance files"
+  description: "Docs, README, governance files"
 
 - name: ci
   color: "5319E7"
-  description: "GitHub Actions and pre-commit"
+  description: "GitHub Actions"
 
 - name: build
   color: "BFD4F2"
-  description: "Makefile / Docker / linters"
+  description: "Build configuration (rustfmt, deny, etc.)"
 
 - name: dependencies
   color: "0366D6"

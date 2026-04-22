@@ -54,7 +54,6 @@ jobs:
               - Rebase or merge the latest `master` into your branch
               - Address any unresolved review comments
               - Make sure CI is green (`cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo test --all-features`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`)
-              - Confirm the entry in `## Unreleased` of `CHANGELOG.md` is still accurate
 
               Otherwise this PR will be closed in 14 days. Closed PRs can always be reopened.
 
