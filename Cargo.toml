@@ -2,8 +2,9 @@
 name = "actix-guard-rs"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.92"
 description = "Application-layer security middleware for actix-web. Part of the guard ecosystem. WIP."
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/rennf93/actix-guard-rs"
 readme = "README.md"
 keywords = ["security", "middleware", "api"]
