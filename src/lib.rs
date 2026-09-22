@@ -1,95 +1,261 @@
 //! # actix-guard-rs
 //!
 //! Application-layer security middleware for
-//! [Actix Web](https://github.com/actix/actix-web), part of the
-//! [Guard ecosystem](https://github.com/rennf93).
+//! [Actix Web](https://github.com/actix/actix-web) 4, powered by the
+//! [guard-core-rs](https://github.com/rennf93/guard-core-rs) detection
+//! engine. Part of the [Guard ecosystem](https://github.com/rennf93).
 //!
-//! ## Status: scaffold
+//! ## Status: implemented (v0.1.0)
 //!
-//! This crate is an intentionally minimal scaffold. The Guard Rust engine
-//! ([guard-core-rs](https://github.com/rennf93/guard-core-rs)) is not yet a
-//! published, consumable crate, so there is no integration code here yet.
-//! What this scaffold establishes is package metadata, CI governance, and
-//! the integration contract documented below, so the engine can be wired in
-//! with minimal friction.
+//! [`GuardTransform`] is a working [`Transform`]
+//! factory and [`GuardService`] a working [`Service`] over `ServiceRequest`.
+//! The engine is
+//! wired in through `guard-core-engine` (a path dependency until the engine
+//! is tagged and published). Per the ecosystem boundary rules, this adapter
+//! holds framework glue only: every detection decision comes from the engine.
 //!
-//! Per the ecosystem boundary rules, adapter crates hold all framework glue
-//! and no security logic: detection, rate limiting, and IP policy live in
-//! the engine, never here.
+//! ## What it inspects
 //!
-//! ## Planned integration: `Transform` + `Service`
+//! One engine call per request view, mirroring the mapping used by the
+//! sibling adapters (`tower-guard-rs`, `guard-core-ts`):
 //!
-//! Actix Web middleware is built from two cooperating pieces, both defined
-//! by `actix-service` and re-exported through `actix-web`:
+//! | Request part | Engine context | Notes |
+//! |---|---|---|
+//! | Path | `url_path` | Skipped for `/` |
+//! | Query string | `query_param` | Skipped when empty |
+//! | Header values | `header` | Skips `sec-*` and hop-by-hop/negotiation headers (see `EXCLUDED_HEADERS` in `src/service.rs`) |
+//! | Body | `request_body` | Buffered first, capped (see below) |
 //!
-//! 1. A factory type implementing `Transform`. Actix Web calls
-//!    `Transform::new_transform` once per worker to turn the factory into
-//!    the per-connection middleware service.
-//! 2. The middleware service itself, implementing `Service`. Its `call`
-//!    receives each `ServiceRequest`, runs the Guard pipeline (IP
-//!    reputation, rate limiting, penetration-attempt detection, security
-//!    headers), and either short-circuits with a Guard-generated error
-//!    response or forwards to the wrapped service, inspecting the
-//!    `ServiceResponse` on the way out.
+//! The HTTP method is not fed to the engine: the engine's `detect` signature
+//! takes content plus a context, and the reference adapters do not scan the
+//! method either.
 //!
-//! The adapter will expose the factory roughly as follows (illustrative
-//! only; the engine API does not exist yet):
+//! ## Body cap
 //!
-//! ```ignore
-//! // Ignored on purpose: actix-web and actix-service are not dependencies
-//! // of this scaffold, so this example cannot compile yet. It documents the
-//! // shape the integration will take.
-//! use actix_service::Service;
-//! use actix_web::body::MessageBody;
-//! use actix_web::dev::{ServiceRequest, ServiceResponse, Transform};
+//! Request bodies are buffered so the engine can inspect them, and the
+//! buffer is bounded by [`GuardTransform::with_body_cap`]. It defaults to the
+//! engine's full-scan cap (`DetectConfig::max_full_scan_bytes`, 262,144 bytes
+//! in the ecosystem default). A request whose body exceeds the cap is
+//! rejected with `413 Payload Too Large` rather than forwarded unscanned: the
+//! engine would only ever see a truncated prefix, which would be a bypass
+//! vector.
 //!
-//! pub struct Guard {
-//!     // engine configuration
-//! }
+//! ## Request rebuilding
 //!
-//! pub struct GuardMiddleware<S> {
-//!     next: S,
-//! }
+//! actix Web consumes a request's payload as it is read, so a body-inspecting
+//! middleware must hand the next service a rebuilt request. The canonical
+//! pattern used here:
 //!
-//! impl<S, B> Transform<S, ServiceRequest> for Guard
-//! where
-//!     S: Service<ServiceRequest, Response = ServiceResponse<B>> + 'static,
-//!     B: MessageBody,
-//! {
-//!     type Response = ServiceResponse<B>;
-//!     type Error = S::Error;
-//!     type InitError = ();
-//!     type Transform = GuardMiddleware<S>;
-//!     type Future = std::future::Ready<Result<Self::Transform, Self::InitError>>;
+//! 1. Split the `ServiceRequest` with
+//!    [`ServiceRequest::into_parts`](actix_web::dev::ServiceRequest::into_parts)
+//!    into an `HttpRequest` and its `Payload`.
+//! 2. Poll the payload to completion under the cap (`Payload` is `Unpin` and
+//!    implements `Stream`, so a `poll_fn` loop buffers it without extra
+//!    stream-utility dependencies).
+//! 3. Rebuild with
+//!    [`ServiceRequest::from_parts`](actix_web::dev::ServiceRequest::from_parts)
+//!    around a fresh `Payload` built from the buffered bytes (actix Web's
+//!    `HttpMessage::set_payload` would land in the same place, but the owning
+//!    split/rebuild keeps the buffering future self-contained).
 //!
-//!     fn new_transform(&self, service: S) -> Self::Future {
-//!         std::future::ready(Ok(GuardMiddleware { next: service }))
-//!     }
-//! }
+//! The inner service therefore observes the request exactly as the client
+//! sent it, body included.
+//!
+//! ## Responses
+//!
+//! | Situation | Status | Body |
+//! |---|---|---|
+//! | Engine flags a view | `403 Forbidden` | `{"detail":"Suspicious activity detected"}` |
+//! | Body exceeds the cap | `413 Payload Too Large` | `{"detail":"Payload too large"}` |
+//! | Body read error or engine panic | `500 Internal Server Error` | `{"detail":"Security check failed"}` |
+//!
+//! These bodies mirror the ecosystem's error shape (a JSON `detail` field)
+//! but the adapter is deliberately **fail-secure**, unlike the TypeScript
+//! adapters whose check pipeline logs and skips on error: any failure to
+//! complete the security check results in `500`, never in an uninspected
+//! passthrough.
+//!
+//! A panic is caught with [`std::panic::catch_unwind`] on the worker thread,
+//! so the default panic hook still prints. `panic = "abort"` in the release
+//! profile disables that recovery, because the process dies before the guard
+//! can respond.
+//!
+//! ## Example
+//!
 //! ```
+//! use actix_guard_rs::{default_config, GuardTransform};
+//! use actix_web::{test, web, App, HttpResponse};
 //!
-//! The `Service` implementation for `GuardMiddleware` (not shown) is where
-//! request inspection and short-circuiting happen.
+//! # let runtime = actix_web::rt::System::new();
+//! # runtime.block_on(async {
+//! let service = test::init_service(
+//!     App::new()
+//!         .wrap(GuardTransform::new(default_config()))
+//!         .route("/", web::post().to(|| async { HttpResponse::Ok().finish() })),
+//! )
+//! .await;
 //!
-//! ## Placeholder API
+//! // Benign traffic passes through untouched.
+//! let request = test::TestRequest::post()
+//!     .uri("/")
+//!     .set_payload("benign body")
+//!     .to_request();
+//! let response = test::call_service(&service, request).await;
+//! assert_eq!(response.status(), actix_web::http::StatusCode::OK);
 //!
-//! [`add`] exists only so the scaffold has a testable public symbol while
-//! the real API surface is designed. It will be removed when the engine
-//! integration lands.
+//! // Attack traffic is blocked by the engine.
+//! let request = test::TestRequest::get()
+//!     .uri("/files/../../etc/passwd")
+//!     .to_request();
+//! let response = test::call_service(&service, request).await;
+//! assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+//! # });
+//! ```
 
-/// Placeholder smoke-test symbol for the scaffold.
+mod response;
+mod service;
+
+use actix_web::Error;
+use actix_web::body::MessageBody;
+use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
+pub use guard_core_engine::detect::{DetectConfig, DetectVerdict, Threat};
+
+pub use crate::response::{BLOCKED_MESSAGE, FAILURE_MESSAGE, OVERSIZE_MESSAGE};
+pub use crate::service::GuardService;
+
+/// Reference default detection configuration.
 ///
-/// It exists only so the crate has a testable public item while the real
-/// API surface is designed; it will be removed when the engine integration
-/// lands.
+/// The engine's [`DetectConfig`] carries no `Default` impl, so the adapter
+/// pins the ecosystem defaults here. They are the values the conformance
+/// corpus records for the reference implementation:
+///
+/// | Knob | Value |
+/// |---|---|
+/// | `max_content_length` | `10_000` |
+/// | `max_full_scan_bytes` | `262_144` |
+/// | `preserve_attack_patterns` | `true` |
+/// | `semantic_threshold` | `0.7` |
+/// | `threat_score_threshold` | `1.0` |
 ///
 /// # Example
 ///
 /// ```
-/// assert_eq!(actix_guard_rs::add(2, 2), 4);
+/// let config = actix_guard_rs::default_config();
+/// let transform = actix_guard_rs::GuardTransform::new(config);
+/// # let _ = transform;
 /// ```
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+#[must_use]
+pub const fn default_config() -> DetectConfig {
+    DetectConfig {
+        max_content_length: 10_000,
+        max_full_scan_bytes: 262_144,
+        preserve_attack_patterns: true,
+        semantic_threshold: 0.7,
+        threat_score_threshold: 1.0,
+    }
+}
+
+/// Engine entry point stored in the transform.
+///
+/// Indirection exists so unit tests can substitute a panicking detector and
+/// exercise the fail-secure path; production builds always store
+/// [`guard_core_engine::detect::detect`].
+pub(crate) type DetectFn = fn(&str, &str, &DetectConfig) -> DetectVerdict;
+
+/// Screens actix Web requests with the Guard engine before they reach the
+/// wrapped service.
+///
+/// Register it with [`App::wrap`](actix_web::App::wrap):
+///
+/// ```ignore
+/// App::new().wrap(GuardTransform::new(default_config()))
+/// ```
+///
+/// The compiled example in the crate docs shows the full setup.
+///
+/// The transform applies to every request routed after it. Wrapped services
+/// are shared through an `Rc` (see [`GuardService`]); actix Web builds its
+/// service tree per worker, so this is free and never crosses threads.
+#[derive(Debug, Clone)]
+pub struct GuardTransform {
+    config: DetectConfig,
+    body_cap: usize,
+    detect_fn: DetectFn,
+}
+
+impl GuardTransform {
+    /// Build a transform from an engine [`DetectConfig`].
+    ///
+    /// The body buffering cap starts at `config.max_full_scan_bytes`.
+    #[must_use]
+    pub fn new(config: DetectConfig) -> Self {
+        Self {
+            config,
+            body_cap: config.max_full_scan_bytes,
+            detect_fn: guard_core_engine::detect::detect,
+        }
+    }
+
+    /// Build a transform with [`default_config`].
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        Self::new(default_config())
+    }
+
+    /// Replace the body buffering cap, in bytes.
+    ///
+    /// A body larger than the cap is rejected with `413 Payload Too Large`.
+    /// A cap of `0` rejects every request that carries a non-empty body.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let transform = actix_guard_rs::GuardTransform::with_defaults()
+    ///     // Reject bodies larger than 1 MiB with 413 instead of buffering more.
+    ///     .with_body_cap(1_048_576);
+    /// # let _ = transform;
+    /// ```
+    #[must_use]
+    pub fn with_body_cap(mut self, body_cap: usize) -> Self {
+        self.body_cap = body_cap;
+        self
+    }
+
+    pub(crate) const fn config(&self) -> &DetectConfig {
+        &self.config
+    }
+
+    pub(crate) const fn body_cap(&self) -> usize {
+        self.body_cap
+    }
+
+    pub(crate) const fn detect_fn(&self) -> DetectFn {
+        self.detect_fn
+    }
+
+    /// Substitute the detector. Test-only: exercises the fail-secure path.
+    #[cfg(test)]
+    pub(crate) fn with_detect_fn(mut self, detect_fn: DetectFn) -> Self {
+        self.detect_fn = detect_fn;
+        self
+    }
+}
+
+impl<S, B> Transform<S, ServiceRequest> for GuardTransform
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    S::Future: 'static,
+    B: MessageBody + 'static,
+{
+    type Response = ServiceResponse;
+    type Error = Error;
+    type InitError = ();
+    type Transform = GuardService<S>;
+    type Future = std::future::Ready<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        std::future::ready(Ok(GuardService::new(service, self.clone())))
+    }
 }
 
 #[cfg(test)]
@@ -97,8 +263,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn default_config_matches_corpus_knobs() {
+        let config = default_config();
+        assert_eq!(config.max_content_length, 10_000);
+        assert_eq!(config.max_full_scan_bytes, 262_144);
+        assert!(config.preserve_attack_patterns);
+        assert!((config.semantic_threshold - 0.7).abs() < f64::EPSILON);
+        assert!((config.threat_score_threshold - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn body_cap_defaults_to_full_scan_cap_and_is_overridable() {
+        let transform = GuardTransform::new(default_config());
+        assert_eq!(transform.body_cap(), 262_144);
+        let transform = transform.with_body_cap(1024);
+        assert_eq!(transform.body_cap(), 1024);
     }
 }
