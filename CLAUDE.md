@@ -3,82 +3,125 @@ Guidance for AI agents (including Claude Code) working in this repository.
 
 ## Project Overview
 
-actix-guard-rs is the reserved namespace for the actix-web adapter of the Guard ecosystem. It will wire the [guard-core-rs](https://github.com/rennf93/guard-core-rs) detection engine into actix-web as application-layer security middleware.
-
-**It is currently a scaffold with no implementation.** Verify this before trusting any other description:
-
-- `src/lib.rs` is the stock 14-line `cargo new` scaffold: one `add(left, right)` function and one trivial unit test. There is no middleware, no guard code, no placeholder types.
-- `Cargo.toml` declares version 0.0.1, edition 2024, MIT, and **no dependencies at all** (not even actix-web).
-- No workflow runs any cargo command. The five workflows under `.github/` are label, greeting, stale, and issue-summary automation only.
-- `README.md` status line: "Reserved namespace. Implementation pending."
+actix-guard-rs is the actix-web adapter for the Guard ecosystem: an [`actix_web::dev::Transform`](https://docs.rs/actix-web/latest/actix_web/dev/trait.Transform.html) plus [`actix_web::dev::Service`](https://docs.rs/actix-web/latest/actix_web/dev/trait.Service.html) that screens `ServiceRequest` traffic through the [guard-core-rs](https://github.com/rennf93/guard-core-rs) detection engine before forwarding it to the wrapped service. It contains no security logic of its own.
 
 - **Repository**: https://github.com/rennf93/actix-guard-rs
-- **Language**: Rust, edition 2024 (requires Rust 1.85 or newer)
-- **License**: MIT
-- **Version**: 0.0.1 (pre-release, not published to crates.io)
-- **Status**: scaffold, implementation pending
+- **Language**: Rust, edition 2024, MSRV 1.92
+- **License**: MIT OR Apache-2.0
+- **Version**: 0.1.0
+- **Status**: implemented and tested. Not published to crates.io: the engine is a local path dependency until it is tagged (see [Engine Dependency](#engine-dependency)).
 
 ## Ecosystem Position
 
 ```
-guard-core (Python)      <- Reference implementation and spec owner (specs/01-14, spec 4.0.2)
-├── guard-core-rs        <- Rust detection engine (pre-1.0: CPU-bound pipeline + conformance harness)
-│   ├── actix-guard-rs   <- This repo: actix-web adapter (scaffold)
-│   ├── axum-guard-rs    <- Sibling adapter (scaffold)
-│   ├── rocket-guard-rs  <- Sibling adapter (scaffold)
-│   └── tower-guard-rs   <- Sibling adapter (scaffold)
-└── fastapi-guard, flaskapi-guard, djapi-guard, tornadoapi-guard  <- Python adapters
+guard-core (Python)              <- Reference implementation, spec owner
+└── guard-core-rs (Rust engine)  <- guard-core-engine: detect, preprocessor, semantic, compiler
+    ├── tower-guard-rs           <- tower Layer + Service (axum-guard-rs composes it)
+    ├── actix-guard-rs (this)    <- actix-web Transform + Service
+    └── rocket-guard-rs          <- Adapter (scaffold)
 ```
 
-The engine crate stays framework-free (no I/O, no tokio, no framework types). This repository is the opposite side of that boundary: framework glue only. No security logic belongs here; it belongs in guard-core-rs.
+Downstream consumers register `GuardTransform` with `App::wrap` (or wrap any `Service<ServiceRequest>` tree with it directly).
 
-## Status
+## Boundary Rules
 
-Scaffold, implementation pending. Concretely, what does not exist:
+- **No security logic in this crate.** Detection comes from `guard-core-engine`'s `detect`. Policy values (thresholds, caps) are configuration, not logic.
+- **No other framework dependencies.** This crate depends on `actix-web`, `bytes`, `futures-core`, and the engine. Never add `axum`, `hyper`, `tower`, `rocket`, or a tokio runtime dependency to `[dependencies]`.
+- **No modifications to the engine.** Engine behavior changes are `guard-core-rs` PRs.
+- **Fail-secure, always.** A body read error, an engine panic, or a body over the cap must never result in an uninspected passthrough. Failures answer `500` (or `413` for oversize).
 
-- No dependency on actix-web or guard-core-rs
-- No `Transform`/`Service` implementation, no configuration type, no response mapping
-- No tests beyond the stock `cargo new` stub
-- No CI that compiles, tests, or lints the crate
-- No published release (version 0.0.1 is a placeholder)
+## Engine Integration
 
-Do not describe this crate as functional, integrated, or published in docs, issues, or PRs.
+`guard-core-engine` exposes exactly one detection entry point, which this adapter calls once per request view:
 
-## Intended Integration
+```rust
+pub fn detect(content: &str, request_context: &str, config: &DetectConfig) -> DetectVerdict
+```
 
-Roadmap, not reality. The intended design, consistent with `specs/impl/rs.md` in the reference repo and the engine's current API:
+`DetectConfig` has five public fields and **no `Default` impl**; the ecosystem defaults are pinned in `crate::default_config()` (10 000 / 262 144 / true / 0.7 / 1.0), matching the conformance corpus knobs. `DetectVerdict` carries `is_threat`, `threat_score`, `threats`, `original_length`, `processed_length` and **no response shape at all**: the `403`/`413`/`500` translation lives in this adapter (`src/response.rs`) and mirrors the ecosystem's `{"detail":"..."}` JSON error shape.
 
-1. **Dependencies**: `guard-core-rs` (facade crate, re-exports `compiler`, `preprocessor`, `semantic`) plus `actix-web`. Versions to be chosen when implementation starts.
-2. **Middleware pair**: implement actix-web's `Transform` that builds a `Service` wrapping the next service, so the guard runs before the handler on every request.
-3. **Per request**: extract method, path, headers, client IP, and body; call the CPU-bound engine functions synchronously (the engine has no I/O and no tokio dependency, so it can run directly on the actix worker thread without an async bridge); short-circuit with a 403 response when the engine returns a threat verdict.
-4. **Out of scope for now**: rate limiting state, Redis, IP intelligence, logging, and event dispatch. Those are later sections of the reference spec and are not part of guard-core-rs at 0.0.1. Do not pull them into the engine.
-5. **Configuration**: no config surface exists yet (section 02 of the reference spec is not ported). Design it only when guard-core-rs provides one.
+View mapping (documented in `src/lib.rs` and `src/service.rs::scan_views`):
 
-Honesty constraint: guard-core-rs at 0.0.1 implements preprocessing, semantic analysis, and pattern compilation, and lacks the 4.x pattern-table scan stage. Any integration built today is partial. Say so in design notes.
+| Request part | Context | Evaluated |
+|---|---|---|
+| `request.path()` | `url_path` | when not `/` |
+| `request.query_string()` | `query_param` | when non-empty |
+| header values | `header` | when the name is not excluded |
+| buffered body | `request_body` | when non-empty after lossy UTF-8 decode |
+
+The method is not scanned: `detect` has no method parameter. Non-UTF-8 header values are skipped (they cannot be represented as `&str`).
+
+## Request Rebuilding and Service Sharing (actix specifics)
+
+actix Web consumes a request's payload while it is read, so the middleware buffers it and rebuilds the request before forwarding. The pattern (see "Request rebuilding" in `src/lib.rs`):
+
+1. `ServiceRequest::into_parts()` into `HttpRequest` + `Payload`.
+2. Poll the payload to completion under the body cap (`Payload` is `Unpin` + `Stream`; a `std::future::poll_fn` loop, no futures-util).
+3. `ServiceRequest::from_parts` around `Payload::from(buffered_bytes)`.
+
+There is no `extract_replacement_body` helper in actix-web 4.x; this is the same split/rebuild shape the framework's own body-consuming paths use.
+
+The next service is shared through an `Rc<S>` (`GuardService`), not cloned: the scanning future must own the inner service because the inner call happens only after buffering completes, and the services actix Web hands to a middleware (e.g. `AppRouting`-derived trees) are not `Clone`. actix Web builds its service tree per worker on single-threaded event loops, so the `Rc` is free and never crosses threads. Consequences: the guard's `Future` is not `Send` (fine for actix), and `GuardTransform` cannot be shared across workers after `new_transform` (the transform factory itself is `Clone + Send + Sync`-friendly plain data).
+
+## Engine Dependency
+
+- `Cargo.toml` declares `guard-core-engine = { path = "../guard-core-rs/crates/guard-core-engine" }`.
+- **TODO(engine):** switch to the versioned crates.io dependency once `guard-core-rs` is tagged and published.
+- The engine crate is used directly, not the `guard-core-rs` facade crate, because the facade re-exports only `compiler`, `preprocessor`, and `semantic`. If the facade later re-exports `detect`, switching is a one-line change.
+- CI checks out `rennf93/guard-core-rs` (branch `master`, moving branch by design, documented in `.github/workflows/ci.yml`) into `../guard-core-rs` before building, mirroring `tower-guard-rs`. Do not replace that with a git dependency without updating the CI comment and this file.
 
 ## Development Commands
 
-No Makefile and no CI. Commands that work on the scaffold as it stands:
+CI is the source of truth (`.github/workflows/ci.yml`); there is no Makefile.
 
 ```bash
-cargo build
-cargo test
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo check --all-targets                              # type check
+cargo fmt --all -- --check                             # format gate
+cargo clippy --all-targets -- -D warnings              # lint gate (pedantic is warn, so -D warnings enforces it)
+cargo test                                             # unit + integration + doctests
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps         # rustdoc gate
 ```
 
-The repository's first-contribution checklist (text inside `.github/workflows/greetings.yml`) cites `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo test --all-features`, and `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps` as the expected bar. No workflow enforces them today; treat them as the target gate once implementation starts.
+A sibling `guard-core-rs` checkout at `../guard-core-rs` is required for every command.
 
-## Technology Stack
+## Project Structure
 
-- **Rust**, edition 2024. No `rust-toolchain.toml`; any recent stable toolchain (1.85+) builds the scaffold.
-- **Dependencies**: none today. Planned: `guard-core-rs` and `actix-web`.
-- **Tooling**: no rustfmt.toml, clippy.toml, deny.toml, or pre-commit config yet.
-- **Automation**: 5 workflows (greetings, labeler, stale, summary, sync-labels) plus `.github/labeler.yml` and `.github/labels.yml`. None of them compile code.
+```
+actix-guard-rs/
+├── src/
+│   ├── lib.rs        # crate docs, GuardTransform, default_config, re-exports
+│   ├── service.rs    # GuardService: buffering, view scanning, dispatch, EXCLUDED_HEADERS
+│   └── response.rs   # 403/413/500 builders and their public message constants
+├── tests/integration.rs  # actix-web test-utility behavior tests through the public API
+└── .github/workflows/ci.yml
+```
+
+## Testing
+
+- `cargo test` runs 12 unit tests (`src/`), 12 integration tests (`tests/integration.rs`), and 4 doctests (3 run, 1 intentionally `ignore`d syntax sketch). All must pass.
+- Coverage must include: benign passthrough (method/path/header/body preserved byte-for-byte through the rebuilt request), XSS in body, traversal in path, command injection in query (`$(echo id)`, percent-encoded as `$(echo%20id)` because raw spaces are invalid in a URI and the engine's preprocessor decodes it back), XSS in a scanned header, an excluded header not scanned, `413` over the cap, body passthrough under the cap (and exactly at it), inner service errors propagated unswallowed, engine panic to `500`, body read error to `500`, and 24 concurrent requests screened independently via `actix_web::rt::spawn`.
+- The engine-panic test uses `GuardTransform::with_detect_fn`, a `#[cfg(test)]`-only seam. Do not expose a public detector-injection API; production must always call `guard_core_engine::detect::detect`.
+- Payloads are chosen from the spec 4.0.2 conformance corpus so they are guaranteed threats, not guesses. New blocked-path tests should do the same (see `guard-core-rs/conformance/guard-core-spec-4.0.2/cases/`).
+
+## Code Quality Standards
+
+- `[lints]` in `Cargo.toml`: `unsafe_code = "forbid"`, `clippy::all = "deny"`, `clippy::pedantic = "warn"` (enforced as errors by CI's `-D warnings`). `clippy::nursery` is deliberately not enabled: its lints drift between clippy versions, as `guard-core-rs` found.
+- No `#[allow(...)]` in `src/`. Test code prefers fixing the lint too.
+- rustdoc warnings are errors in CI.
+
+## Best Practices
+
+1. **Keep the engine call surface unchanged.** Every request goes through `scan_request` -> `catch_unwind` -> `detect`. Do not bypass the panic recovery.
+2. **Do not weaken fail-secure.** Any new failure path must map to `500` or a documented rejection, never to a passthrough.
+3. **Keep `EXCLUDED_HEADERS` in sync with `tower-guard-rs` and `guard-core-ts`** when it changes, and record the reason in the const's doc comment.
+4. **Run the full local gate before committing**: fmt, clippy, test, doc. CI runs all four.
+5. **Conventional commits** (`feat:`, `fix:`, `docs:`, `ci:`), matching history. No AI attribution in commit messages.
+6. **Document status honestly.** Nothing here is published; say so in the README and crate docs rather than implying a crates.io release.
+7. **Update the README behavior tables** when the mapping, response shapes, or cap semantics change. The tables are the contract users read.
 
 ## Related Projects
 
-- [guard-core-rs](https://github.com/rennf93/guard-core-rs): the engine this adapter will wire in (pre-1.0, work in progress).
-- Sibling adapters: [axum-guard-rs](https://github.com/rennf93/axum-guard-rs), [rocket-guard-rs](https://github.com/rennf93/rocket-guard-rs), [tower-guard-rs](https://github.com/rennf93/tower-guard-rs).
-- [guard-core](https://github.com/rennf93/guard-core): Python reference implementation and spec owner (spec 4.0.2).
+- [guard-core-rs](https://github.com/rennf93/guard-core-rs): Rust detection engine (this crate's dependency).
+- [tower-guard-rs](https://github.com/rennf93/tower-guard-rs): tower adapter whose semantics this crate mirrors.
+- [guard-core](https://github.com/rennf93/guard-core): Python reference implementation and spec owner.
 - [fastapi-guard](https://github.com/rennf93/fastapi-guard): the most mature adapter in the ecosystem, a useful reference for feature coverage.

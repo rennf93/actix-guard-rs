@@ -18,7 +18,7 @@ env:
 
 jobs:
   check:
-    name: stable (check, fmt, clippy, test)
+    name: stable (check, fmt, clippy, test, doc)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -27,6 +27,24 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+
+      # Supply-chain tradeoff, deliberate: this pins a MOVING branch of the
+      # core engine, not an immutable ref, because the engine has no crates.io
+      # release yet. The Cargo.toml dependency is a local path
+      # (../guard-core-rs/crates/guard-core-engine) with a documented TODO to
+      # switch to the versioned crate once guard-core-rs is tagged. Once the
+      # engine publishes, this checkout step drops in favor of the registry.
+      - name: Checkout guard-core-rs (path dependency)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: rennf93/guard-core-rs
+          ref: master
+          path: core-checkout
+          persist-credentials: false
+
+      - name: Place guard-core-rs at the path dependency location
+        run: mv core-checkout ../guard-core-rs
+
       - name: Install the stable Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
@@ -40,6 +58,10 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: cargo test
         run: cargo test
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
 
   msrv:
     name: msrv 1.92 (check, test)
@@ -51,6 +73,19 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+
+      # Moving branch, same tradeoff as the stable job above.
+      - name: Checkout guard-core-rs (path dependency)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: rennf93/guard-core-rs
+          ref: master
+          path: core-checkout
+          persist-credentials: false
+
+      - name: Place guard-core-rs at the path dependency location
+        run: mv core-checkout ../guard-core-rs
+
       - name: Install the MSRV Rust toolchain (1.92)
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
