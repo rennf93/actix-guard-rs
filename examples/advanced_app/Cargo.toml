@@ -1,0 +1,21 @@
+[package]
+name = "actix-guard-advanced-app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+description = "Production-shaped actix-guard-rs example service."
+
+[dependencies]
+actix-web = "4"
+actix-guard-rs = { path = "../..", version = "0.1.0" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all                = { level = "deny", priority = -1 }
+pedantic           = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

@@ -1,0 +1,84 @@
+name: Release Gate
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test at tag (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: ['stable', '1.92.0']
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Moving branch, same tradeoff as ci.yml: the engine has no crates.io
+      # release yet, so the tag gate rebuilds against a fresh master checkout.
+      - name: Checkout guard-core-rs (path dependency)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rennf93/guard-core-rs
+          ref: master
+          path: core-checkout
+          persist-credentials: false
+
+      - name: Place guard-core-rs at the path dependency location
+        run: mv core-checkout ../guard-core-rs
+
+      - name: Install the Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          toolchain: ${{ matrix.rust }}
+          rustflags: ""
+
+      - name: cargo fmt check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+  tag-consistency:
+    name: Tag matches crate version
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Publish to crates.io is manual and owner-gated. A `cargo package`
+      # dry run cannot run yet either: packaging strips path dependencies and
+      # re-resolves them from crates.io, where guard-core-engine does not
+      # exist until it is tagged and published. Until then the consumable
+      # check is this tag/version consistency gate.
+      - name: Verify tag equals the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "actix-guard-rs") | .version')
+          if [ "$tag" != "$version" ]; then
+            echo "tag v$tag does not match crate version $version"
+            exit 1
+          fi
+          echo "ok: tag v$tag matches crate version $version"

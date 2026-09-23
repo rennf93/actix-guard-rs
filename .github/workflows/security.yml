@@ -1,0 +1,51 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    # Weekly, Monday morning UTC: catch advisories published after the last push.
+    - cron: '0 6 * * 1'
+
+permissions: {}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # cargo deny resolves the whole workspace graph, which includes the
+      # sibling path dependency, so the engine must be checked out first
+      # (same tradeoff and comment as ci.yml).
+      - name: Checkout guard-core-rs (path dependency)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rennf93/guard-core-rs
+          ref: master
+          path: core-checkout
+          persist-credentials: false
+
+      - name: Place guard-core-rs at the path dependency location
+        run: mv core-checkout ../guard-core-rs
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check

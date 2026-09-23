@@ -1,0 +1,55 @@
+name: Upstream Drift
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+
+jobs:
+  upstream-drift:
+    name: Test against guard-core-rs@master
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout actix-guard-rs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Override mechanism, documented: the adapter consumes the engine as a
+      # sibling path dependency (../guard-core-rs), so checking out
+      # rennf93/guard-core-rs@master at that location IS the override. The
+      # suite then compiles and runs against upstream master with no
+      # Cargo.toml [patch] or --config tricks needed. When the engine is
+      # published to crates.io, the path dependency goes away and this
+      # workflow should switch to a [patch.crates-io] entry instead.
+      - name: Checkout guard-core-rs@master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rennf93/guard-core-rs
+          ref: master
+          path: core-checkout
+          persist-credentials: false
+
+      - name: Place guard-core-rs at the path dependency location
+        run: mv core-checkout ../guard-core-rs
+
+      - name: Install the Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: ""
+
+      - name: Run the adapter test suite against guard-core-rs@master
+        run: |
+          cargo test
+          cargo clippy --all-targets -- -D warnings

@@ -78,22 +78,52 @@ CI is the source of truth (`.github/workflows/ci.yml`); there is no Makefile.
 cargo check --all-targets                              # type check
 cargo fmt --all -- --check                             # format gate
 cargo clippy --all-targets -- -D warnings              # lint gate (pedantic is warn, so -D warnings enforces it)
-cargo test                                             # unit + integration + doctests
+cargo test                                             # unit + integration + doctests (workspace: adapter + examples)
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps         # rustdoc gate
+cargo deny check                                       # advisories, licenses, bans, sources (deny.toml)
 ```
 
 A sibling `guard-core-rs` checkout at `../guard-core-rs` is required for every command.
+
+The example apps under `examples/` build and run like any workspace member:
+
+```bash
+docker compose -f examples/simple_app/docker-compose.yml up --build -d --wait    # live smoke stack
+SMOKE_PORT=8091 docker compose -f examples/simple_app/docker-compose.yml up ...   # remapped host port
+```
+
+The compose stacks also need the sibling `../guard-core-rs` checkout: the
+Dockerfile receives the engine source through a compose
+`additional_contexts` entry named `engine` pointing at `../../../guard-core-rs`
+(relative to the compose file). The `live-smoke` workflow runs the simple_app
+stack and the full curl assertion matrix on every push/PR; `upstream-drift`
+runs the suite daily against a fresh `guard-core-rs@master` checkout placed at
+the path dependency location. `security.yml` runs `cargo deny check` on
+push/PR and weekly. `release.yml` gates `v*` tag pushes with the full suite
+plus a tag/version consistency check; crates.io publishing is manual and
+owner-gated.
 
 ## Project Structure
 
 ```
 actix-guard-rs/
+├── Cargo.toml / Cargo.lock          # adapter package + workspace (examples are members)
+├── deny.toml                        # cargo-deny: advisories, licenses, bans, sources
 ├── src/
 │   ├── lib.rs        # crate docs, GuardTransform, default_config, re-exports
 │   ├── service.rs    # GuardService: buffering, view scanning, dispatch, EXCLUDED_HEADERS
 │   └── response.rs   # 403/413/500 builders and their public message constants
 ├── tests/integration.rs  # actix-web test-utility behavior tests through the public API
-└── .github/workflows/ci.yml
+├── examples/
+│   ├── simple_app/       # minimal guarded App: main.rs, Dockerfile, compose, README
+│   └── advanced_app/     # env-driven config, route-scoped guards: main.rs, Dockerfile, compose, README
+└── .github/
+    ├── workflows/ci.yml             # push/PR: fmt, clippy, test, doc, MSRV
+    ├── workflows/security.yml       # push/PR + weekly: cargo deny check
+    ├── workflows/live-smoke.yml     # push/PR: dockerized simple_app smoke with curl assertions
+    ├── workflows/upstream-drift.yml # daily: suite against guard-core-rs@master
+    ├── workflows/release.yml        # v* tag gate: matrix test + tag/version consistency
+    └── workflows/issue-link.yml     # PRs must reference an open issue
 ```
 
 ## Testing
@@ -114,10 +144,12 @@ actix-guard-rs/
 1. **Keep the engine call surface unchanged.** Every request goes through `scan_request` -> `catch_unwind` -> `detect`. Do not bypass the panic recovery.
 2. **Do not weaken fail-secure.** Any new failure path must map to `500` or a documented rejection, never to a passthrough.
 3. **Keep `EXCLUDED_HEADERS` in sync with `tower-guard-rs` and `guard-core-ts`** when it changes, and record the reason in the const's doc comment.
-4. **Run the full local gate before committing**: fmt, clippy, test, doc. CI runs all four.
-5. **Conventional commits** (`feat:`, `fix:`, `docs:`, `ci:`), matching history. No AI attribution in commit messages.
-6. **Document status honestly.** Nothing here is published; say so in the README and crate docs rather than implying a crates.io release.
-7. **Update the README behavior tables** when the mapping, response shapes, or cap semantics change. The tables are the contract users read.
+4. **Run the full local gate before committing**: fmt, clippy, test, doc, cargo deny. CI runs all five.
+5. **Example apps are part of the workspace.** `examples/simple_app` and `examples/advanced_app` build with a plain `cargo build` from the repo root; when you change the adapter's public API or response shapes, update the examples and their READMEs (and re-run the live smoke assertions) in the same change.
+6. **Conventional commits** (`feat:`, `fix:`, `docs:`, `ci:`), matching history. No AI attribution in commit messages.
+7. **Document status honestly.** Nothing here is published; say so in the README and crate docs rather than implying a crates.io release. crates.io publishing is manual and owner-gated; the release workflow only gates the tag.
+8. **Update the README behavior tables** when the mapping, response shapes, or cap semantics change. The tables are the contract users read.
+9. **Keep the engine surface claims honest.** guard-core-rs currently ships the CPU-bound detection pipeline only: no Redis, rate limiter, or ban manager. Do not document capabilities the engine does not expose.
 
 ## Related Projects
 
