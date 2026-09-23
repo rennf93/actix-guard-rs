@@ -1,0 +1,39 @@
+# cargo-deny configuration, based on guard-agent-rs's permissive license
+# allow-list, trimmed to the entries the workspace actually uses (plus a few
+# likely arrivals from the engine's future Redis/I/O surface). Checks
+# advisories, licenses, bans, and sources for the whole workspace
+# (adapter + example apps).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+  # h2 0.3.x is the last branch actix-http 3.x accepts, and 0.3.27 (the
+  # latest) is the flagged one; the fix lives in h2 0.4, which actix-http
+  # does not consume yet. Drop this entry when actix-http migrates to h2 0.4.
+  "RUSTSEC-2026-0258",
+]
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
