@@ -1,3 +1,6 @@
+[workspace]
+members = ["examples/simple_app", "examples/advanced_app"]
+
 [package]
 name = "actix-guard-rs"
 version = "0.1.0"
@@ -22,7 +25,7 @@ futures-core = { version = "0.3", default-features = false }
 # is tagged and published. The path points at the engine crate inside the
 # guard-core-rs workspace; a sibling checkout is required for local builds and
 # CI checks out one (see .github/workflows/ci.yml).
-guard-core-engine = { path = "../guard-core-rs/crates/guard-core-engine" }
+guard-core-engine = { path = "../guard-core-rs/crates/guard-core-engine", version = "0.0.1" }
 
 [dev-dependencies]
 actix-web = { version = "4", features = ["macros"] }

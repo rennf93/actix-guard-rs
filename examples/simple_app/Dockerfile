@@ -1,0 +1,37 @@
+# Build context is the repository root (see docker-compose.yml):
+#   docker build -f examples/simple_app/Dockerfile .
+#
+# The engine (guard-core-rs) is a sibling path dependency of the adapter, so
+# the build needs its source too. It is provided through the additional build
+# context named "engine" (compose additional_contexts / docker
+# --build-context engine=<path to guard-core-rs checkout>); only the engine
+# crate and its workspace manifest are copied out of that context.
+FROM rust:1.95-slim-bookworm AS build
+
+WORKDIR /build
+
+COPY --from=engine /Cargo.toml ./guard-core-rs/Cargo.toml
+COPY --from=engine /Cargo.lock ./guard-core-rs/Cargo.lock
+COPY --from=engine /crates/guard-core-engine ./guard-core-rs/crates/guard-core-engine
+
+COPY Cargo.toml Cargo.lock ./actix-guard-rs/
+COPY src ./actix-guard-rs/src
+COPY examples ./actix-guard-rs/examples
+
+WORKDIR /build/actix-guard-rs
+RUN cargo build --release -p actix-guard-simple-app
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home --uid 10001 guard
+
+COPY --from=build /build/actix-guard-rs/target/release/actix-guard-simple-app /usr/local/bin/simple-app
+
+USER guard
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/simple-app"]
