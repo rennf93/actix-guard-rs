@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+  release:
+    types: [created]
 
 permissions: {}
 
@@ -28,8 +30,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Moving branch, same tradeoff as ci.yml: the engine has no crates.io
-      # release yet, so the tag gate rebuilds against a fresh master checkout.
+      # Moving branch, same tradeoff as ci.yml: the dependency is a sibling
+      # path checkout, so the tag gate rebuilds against a fresh master
+      # checkout (which carries the matching engine release).
       - name: Checkout guard-core-rs (path dependency)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,11 +71,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Publish to crates.io is manual and owner-gated. A `cargo package`
-      # dry run cannot run yet either: packaging strips path dependencies and
-      # re-resolves them from crates.io, where guard-core-engine does not
-      # exist until it is tagged and published. Until then the consumable
-      # check is this tag/version consistency gate.
+      # Publishing is automated: the publish job below runs on GitHub
+      # release creation. This tag/version consistency gate remains the
+      # cheap check that the tag matches the published crate version.
       - name: Verify tag equals the crate version
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -82,3 +83,40 @@ jobs:
             exit 1
           fi
           echo "ok: tag v$tag matches crate version $version"
+
+  publish:
+    name: Publish to crates.io
+    needs: tag-consistency
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: ""
+
+      # Packaging strips the path dependencies and re-resolves them from
+      # crates.io, where the pinned engine version already exists, so no
+      # sibling checkout is needed here. Retried up to 3 times (crates.io
+      # transient 5xx). NOTE on reruns: crates.io rejects re-uploading an
+      # identical version.
+      - name: Publish actix-guard-rs
+        run: |
+          for attempt in 1 2 3; do
+            if cargo publish; then
+              exit 0
+            fi
+            echo "attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
+          echo "actix-guard-rs publish failed after 3 attempts"
+          exit 1
