@@ -113,16 +113,29 @@ jobs:
         with:
           persist-credentials: false
 
+      # The root workspace (examples included) resolves the sibling path
+      # dependency before packaging, so it must be checked out here too.
+      # The packaged crate itself ships the registry dependency: packaging
+      # strips the path and keeps the version pin, which already exists on
+      # crates.io.
+      - name: Checkout guard-core-rs (path dependency)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rennf93/guard-core-rs
+          ref: master
+          path: core-checkout
+          persist-credentials: false
+
+      - name: Place guard-core-rs at the path dependency location
+        run: mv core-checkout ../guard-core-rs
+
       - name: Install the Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           rustflags: ""
 
-      # Packaging strips the path dependencies and re-resolves them from
-      # crates.io, where the pinned engine version already exists, so no
-      # sibling checkout is needed here. Retried up to 3 times (crates.io
-      # transient 5xx). NOTE on reruns: crates.io rejects re-uploading an
-      # identical version.
+      # Retried up to 3 times (crates.io transient 5xx). NOTE on reruns:
+      # crates.io rejects re-uploading an identical version.
       - name: Publish actix-guard-rs
         run: |
           for attempt in 1 2 3; do
