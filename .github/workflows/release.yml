@@ -72,6 +72,19 @@ jobs:
         with:
           persist-credentials: false
 
+      # cargo metadata resolves the sibling path dependency, so it must be
+      # checked out before the version can be read (same as the test job).
+      - name: Checkout guard-core-rs (path dependency)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rennf93/guard-core-rs
+          ref: master
+          path: core-checkout
+          persist-credentials: false
+
+      - name: Place guard-core-rs at the path dependency location
+        run: mv core-checkout ../guard-core-rs
+
       # Publishing is automated: the publish job below runs on GitHub
       # release creation. This tag/version consistency gate remains the
       # cheap check that the tag matches the published crate version.
