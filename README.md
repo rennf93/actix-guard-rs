@@ -2,7 +2,7 @@
 
 Application-layer security middleware for [actix-web](https://github.com/actix/actix-web) 4, powered by the [guard-core-rs](https://github.com/rennf93/guard-core-rs) detection engine. Part of the [guard ecosystem](https://github.com/rennf93).
 
-Docs: https://rennf93.github.io/actix-guard-rs/
+Docs: <https://rennf93.github.io/actix-guard-rs/>
 
 **Status:** Released. Version 1.0.0, published to crates.io. `GuardTransform` and `GuardService` are working actix-web middleware, screened by the engine.
 
