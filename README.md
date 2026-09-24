@@ -2,15 +2,17 @@
 
 Application-layer security middleware for [actix-web](https://github.com/actix/actix-web) 4, powered by the [guard-core-rs](https://github.com/rennf93/guard-core-rs) detection engine. Part of the [guard ecosystem](https://github.com/rennf93).
 
-**Status:** Implemented, version 0.1.0. `GuardTransform` and `GuardService` are working actix-web middleware, screened by the engine. Not yet published to crates.io: the engine is a local path dependency for now (see [Engine dependency](#engine-dependency)).
+Docs: https://rennf93.github.io/actix-guard-rs/
+
+**Status:** Released. Version 1.0.0, published to crates.io. `GuardTransform` and `GuardService` are working actix-web middleware, screened by the engine.
 
 ## About
 
 The guard ecosystem provides application-layer API security middleware across multiple languages and frameworks:
 
-- **Python**: [fastapi-guard](https://github.com/rennf93/fastapi-guard), [flaskapi-guard](https://github.com/rennf93/flaskapi-guard), [dj-api-guard](https://github.com/rennf93/dj-api-guard), [tornado-api-guard](https://github.com/rennf93/tornado-api-guard)
+- **Python**: [fastapi-guard](https://github.com/rennf93/fastapi-guard), [flaskapi-guard](https://github.com/rennf93/flaskapi-guard), [djapi-guard](https://github.com/rennf93/djapi-guard), [tornadoapi-guard](https://github.com/rennf93/tornadoapi-guard)
 - **TypeScript**: guard-core-ts with adapters for Express, Fastify, Hono, NestJS
-- **Rust**: [guard-core-rs](https://github.com/rennf93/guard-core-rs) with adapters for [tower](https://github.com/rennf93/tower-guard-rs), [axum](https://github.com/rennf93/axum-guard-rs), actix-web (this repo), and rocket
+- **Rust**: [guard-core-rs](https://github.com/rennf93/guard-core-rs) with adapters for [tower](https://github.com/rennf93/tower-guard-rs), [axum](https://github.com/rennf93/axum-guard-rs), [actix-web](https://github.com/rennf93/actix-guard-rs) (this repo), and [rocket](https://github.com/rennf93/rocket-guard-rs)
 
 Per the ecosystem boundary rules, this crate holds framework glue only: every detection decision comes from the engine.
 
@@ -77,7 +79,7 @@ actix Web consumes a request's payload as it is read, so the middleware buffers 
 
 ## Engine dependency
 
-The engine is consumed as a local path dependency on the `guard-core-rs` workspace (`../guard-core-rs/crates/guard-core-engine`), because `guard-core-rs` has no tagged crates.io release yet. CI checks out `rennf93/guard-core-rs` (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)), mirroring the sibling adapter pattern in `tower-guard-rs`. **TODO:** switch to the versioned crate once the engine is tagged and published.
+The Cargo.toml pins `guard-core-engine` 4.0.4, published to crates.io, and also carries a path pointing at the engine crate inside a sibling `guard-core-rs` checkout (`../guard-core-rs/crates/guard-core-engine`) so local builds and CI compile the engine from source; consumers installing the crate from the registry resolve the engine normally. CI checks out `rennf93/guard-core-rs` (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)), mirroring the sibling adapter pattern in `tower-guard-rs`.
 
 The engine crate is `guard-core-engine` rather than the `guard-core-rs` facade because the facade currently re-exports only `compiler`, `preprocessor`, and `semantic`; `detect` (the entry point this adapter uses) is not re-exported there yet.
 
