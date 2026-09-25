@@ -260,10 +260,7 @@ mod tests {
 
         let response = guard.call(request).await.expect("response");
         assert_eq!(response.status(), 500);
-        assert_eq!(
-            body_text(response),
-            format!(r#"{{"detail":"{FAILURE_MESSAGE}"}}"#)
-        );
+        assert_eq!(body_text(response), FAILURE_MESSAGE);
     }
 
     #[actix_web::test]
@@ -295,10 +292,7 @@ mod tests {
             .to_srv_request();
         let response = guard.call(request).await.expect("response");
         assert_eq!(response.status(), 403);
-        assert_eq!(
-            body_text(response),
-            format!(r#"{{"detail":"{BLOCKED_MESSAGE}"}}"#)
-        );
+        assert_eq!(body_text(response), BLOCKED_MESSAGE);
     }
 
     #[actix_web::test]
@@ -311,10 +305,7 @@ mod tests {
 
         let response = guard.call(request).await.expect("response");
         assert_eq!(response.status(), 500);
-        assert_eq!(
-            body_text(response),
-            format!(r#"{{"detail":"{FAILURE_MESSAGE}"}}"#)
-        );
+        assert_eq!(body_text(response), FAILURE_MESSAGE);
     }
 
     #[actix_web::test]

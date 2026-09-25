@@ -40,9 +40,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
 ## Behavior Contracts
 
-- Block: `403` + `{"detail":"Suspicious activity detected"}`.
-- Oversize body: `413` + `{"detail":"Payload too large"}`. Cap defaults to `max_full_scan_bytes`; oversize is rejected, never passed unscanned.
-- Body read error or engine panic: `500` + `{"detail":"Security check failed"}`. Fail-secure, unlike the TypeScript adapters which fail open.
+- Block: `403` + `Suspicious activity detected`.
+- Oversize body: `413` + `Payload too large`. Cap defaults to `max_full_scan_bytes`; oversize is rejected, never passed unscanned.
+- Body read error or engine panic: `500` + `Security check failed`. Fail-secure, unlike the TypeScript adapters which fail open.
 - `EXCLUDED_HEADERS` (never scanned): `host`, `user-agent`, `accept`, `accept-encoding`, `connection`, `origin`, `referer`, plus every `sec-*` header. Mirrors `guard-core-ts` and `tower-guard-rs`.
 - Method is not scanned (the engine has no method parameter). Non-UTF-8 header values are skipped.
 - Requests are rebuilt before forwarding: `into_parts`, buffer the `Payload` under the cap via a `poll_fn` loop, then `ServiceRequest::from_parts` around `Payload::from(buffered_bytes)`. The inner service sees the original request bytes.

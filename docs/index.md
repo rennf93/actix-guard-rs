@@ -78,9 +78,9 @@ reference adapters do not scan the method either.
 
 | Situation | Status | Body |
 |---|---|---|
-| Engine flags a view | `403 Forbidden` | `{"detail":"Suspicious activity detected"}` |
-| Body exceeds the cap | `413 Payload Too Large` | `{"detail":"Payload too large"}` |
-| Body read error or engine panic | `500 Internal Server Error` | `{"detail":"Security check failed"}` |
+| Engine flags a view | `403 Forbidden` | `Suspicious activity detected` |
+| Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
+| Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
 
 ## Where to go next
 

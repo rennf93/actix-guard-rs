@@ -38,7 +38,7 @@ Downstream consumers register `GuardTransform` with `App::wrap` (or wrap any `Se
 pub fn detect(content: &str, request_context: &str, config: &DetectConfig) -> DetectVerdict
 ```
 
-`DetectConfig` has five public fields and **no `Default` impl**; the ecosystem defaults are pinned in `crate::default_config()` (10 000 / 262 144 / true / 0.7 / 1.0), matching the conformance corpus knobs. `DetectVerdict` carries `is_threat`, `threat_score`, `threats`, `original_length`, `processed_length` and **no response shape at all**: the `403`/`413`/`500` translation lives in this adapter (`src/response.rs`) and mirrors the ecosystem's `{"detail":"..."}` JSON error shape.
+`DetectConfig` has five public fields and **no `Default` impl**; the ecosystem defaults are pinned in `crate::default_config()` (10 000 / 262 144 / true / 0.7 / 1.0), matching the conformance corpus knobs. `DetectVerdict` carries `is_threat`, `threat_score`, `threats`, `original_length`, `processed_length` and **no response shape at all**: the `403`/`413`/`500` translation lives in this adapter (`src/response.rs`) and follows the ecosystem's plain-text error convention (the bare message, `text/plain; charset=utf-8`).
 
 View mapping (documented in `src/lib.rs` and `src/service.rs::scan_views`):
 
