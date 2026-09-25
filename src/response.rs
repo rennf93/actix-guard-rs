@@ -4,7 +4,6 @@ use actix_web::dev::ServiceResponse;
 use actix_web::http::StatusCode;
 use actix_web::http::header::CONTENT_TYPE;
 use actix_web::{HttpRequest, HttpResponse};
-use bytes::Bytes;
 
 /// Detail message carried by the `403 Forbidden` block response.
 pub const BLOCKED_MESSAGE: &str = "Suspicious activity detected";
@@ -16,23 +15,23 @@ pub const OVERSIZE_MESSAGE: &str = "Payload too large";
 pub const FAILURE_MESSAGE: &str = "Security check failed";
 
 pub(crate) fn blocked(request: HttpRequest) -> ServiceResponse {
-    json(request, StatusCode::FORBIDDEN, BLOCKED_MESSAGE)
+    plain_text(request, StatusCode::FORBIDDEN, BLOCKED_MESSAGE)
 }
 
 pub(crate) fn oversize(request: HttpRequest) -> ServiceResponse {
-    json(request, StatusCode::PAYLOAD_TOO_LARGE, OVERSIZE_MESSAGE)
+    plain_text(request, StatusCode::PAYLOAD_TOO_LARGE, OVERSIZE_MESSAGE)
 }
 
 pub(crate) fn failure(request: HttpRequest) -> ServiceResponse {
-    json(request, StatusCode::INTERNAL_SERVER_ERROR, FAILURE_MESSAGE)
+    plain_text(request, StatusCode::INTERNAL_SERVER_ERROR, FAILURE_MESSAGE)
 }
 
-/// The ecosystem's JSON error shape: a `detail` field, `application/json`.
-fn json(request: HttpRequest, status: StatusCode, detail: &'static str) -> ServiceResponse {
-    let body = Bytes::from(format!(r#"{{"detail":"{detail}"}}"#));
+/// The ecosystem's error shape: the bare message as the body,
+/// `text/plain; charset=utf-8` (same as the Python family).
+fn plain_text(request: HttpRequest, status: StatusCode, message: &'static str) -> ServiceResponse {
     let response = HttpResponse::build(status)
-        .insert_header((CONTENT_TYPE, "application/json"))
-        .body(body);
+        .insert_header((CONTENT_TYPE, "text/plain; charset=utf-8"))
+        .body(message);
     ServiceResponse::new(request, response)
 }
 
@@ -40,6 +39,7 @@ fn json(request: HttpRequest, status: StatusCode, detail: &'static str) -> Servi
 mod tests {
     use super::*;
     use actix_web::body::MessageBody;
+    use bytes::Bytes;
 
     fn test_request() -> HttpRequest {
         actix_web::test::TestRequest::default().to_http_request()
@@ -56,11 +56,11 @@ mod tests {
                 .expect("content type")
                 .to_str()
                 .expect("ascii"),
-            "application/json"
+            "text/plain; charset=utf-8"
         );
         assert_eq!(
             response.into_body().try_into_bytes().expect("bytes"),
-            Bytes::from_static(br#"{"detail":"Suspicious activity detected"}"#)
+            Bytes::from_static(b"Suspicious activity detected")
         );
     }
 
@@ -68,6 +68,19 @@ mod tests {
     fn oversize_response_shape() {
         let response = oversize(test_request());
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .expect("content type")
+                .to_str()
+                .expect("ascii"),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            response.into_body().try_into_bytes().expect("bytes"),
+            Bytes::from_static(b"Payload too large")
+        );
     }
 
     #[test]
@@ -75,8 +88,17 @@ mod tests {
         let response = failure(test_request());
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .expect("content type")
+                .to_str()
+                .expect("ascii"),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
             response.into_body().try_into_bytes().expect("bytes"),
-            Bytes::from_static(br#"{"detail":"Security check failed"}"#)
+            Bytes::from_static(b"Security check failed")
         );
     }
 }

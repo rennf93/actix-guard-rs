@@ -49,9 +49,9 @@ compose stack (on port 8080; set `SMOKE_PORT` to remap the host port):
 | `GET /` | `200` |
 | `GET /health` | `200` (excluded path) |
 | `GET /search?q=hello` | `200` |
-| `GET /search?q=<script>alert(1)</script>` | `403`, body `{"detail":"Suspicious activity detected"}` |
-| `GET /files/../../etc/passwd` (`--path-as-is`) | `403`, body `{"detail":"Suspicious activity detected"}` |
-| `POST /echo` with a 300 KB body | `413`, body `{"detail":"Payload too large"}` (default cap: 262144 bytes) |
+| `GET /search?q=<script>alert(1)</script>` | `403`, body `Suspicious activity detected` |
+| `GET /files/../../etc/passwd` (`--path-as-is`) | `403`, body `Suspicious activity detected` |
+| `POST /echo` with a 300 KB body | `413`, body `Payload too large` (default cap: 262144 bytes) |
 | `POST /echo` with body `hello world` | `200`, body echoed |
 
 Quick manual check:
