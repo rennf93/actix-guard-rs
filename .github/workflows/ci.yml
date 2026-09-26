@@ -74,9 +74,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # TEMPORARY pin: the body-value extraction this adapter consumes lives
-      # on the engine's feat/body-form-scan-binary-islands branch until
-      # rennf93/guard-core-rs merges it. Track master again after that merge.
+      # The TEMPORARY pin to the engine's feat/body-form-scan-binary-islands
+      # branch is history: guard-core-rs merged it, so this checkout tracks
+      # master again (and drops for the registry crate once it is tagged).
       # Moving branch, same tradeoff as the stable job above.
       - name: Checkout guard-core-rs (path dependency)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
