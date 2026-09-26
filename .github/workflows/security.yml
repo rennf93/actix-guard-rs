@@ -36,7 +36,7 @@ jobs:
         with:
           # Merged as rennf93/guard-core-rs#22; tracks master.
           repository: rennf93/guard-core-rs
-          ref: master
+          ref: master # TEMPORARY pin: tracks the feat/exempt-ips companion PR until it merges, then back to master
           path: core-checkout
           persist-credentials: false
 
