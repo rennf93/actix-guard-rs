@@ -4,14 +4,18 @@ All notable changes to this project.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-26
+
 ### Added
 
 - Optional global IP gate (`GuardTransform::with_ip_gate` over the new engine `IpGateConfig`): `whitelist`, `blacklist`, and `exempt_ips` lists parsed once at startup (invalid entry is a config error, fail closed), evaluated before body buffering - a blacklisted client IP, or one a non-empty `whitelist` matches neither directly nor through `exempt_ips`, is denied with `403 Forbidden`. `exempt_ips` is the skip-list for known-friendly automation: it sets the same skip state a whitelist match sets (`IpGateDecision`, inserted into the request extensions) but never adds a deny path and never opens the whitelist gate; the blacklist and detection still apply to exempt IPs. The client IP is the request's peer address, so unattributed requests (no peer) are not gated and still screened by detection
 
 ### Changed
 
+- `guard-core-engine` dependency pinned to the published 4.1.0 release (path dep kept for local builds and CI against a sibling `guard-core-rs` checkout), carrying the stateful sliding-window rate limiter and dynamic IP ban engine, the tower stage with a reusable `decide()`, and the new detection stages (request size/content, user-agent, headers/auth, cloud provider blocking, geo blocking)
 - The buffered request body is no longer scanned as one lossy blob: it is routed by content type through the engine's body-value extraction (guard-core 4.0.4 parity, upstream commit 5f399234), and every extracted value is scanned through the normal detect path with its reference context - urlencoded field values under `request_body:form_field`, multipart part entries (label scan, `filename="..."` entry with RFC 2231 handling, raw part headers, payload) under `request_body:multipart_field`, embedded JSON leaves under the `:embedded_json` suffix, JSON mongo operator keys (`$where`, `$ne`, ...) as direct `nosql` hits, and the whole-body blob only as the fallback for plain or unparseable bodies
 - Binary-dense multipart file-part payloads are reduced to printable runs of at least `detection_binary_min_run_length` (default 16) before pattern scanning, so compressed upload bytes stop producing attack-shaped matches while text embedded in uploads still scans in full; text uploads, text parts without a filename, and whole-body fallback scans keep their full scan
+- 403/413/500 short-circuit responses now carry the bare message (`Suspicious activity detected`, `Payload too large`, `Security check failed`) as `text/plain; charset=utf-8`, matching the Python family's block-response convention, instead of the JSON `{"detail":"..."}` shape
 
 ## [1.0.0] - 2026-09-24
 
@@ -28,9 +32,3 @@ All notable changes to this project.
 ### Changed
 
 - `guard-core-engine` dependency pinned to the published 4.0.4 release (path dep kept for local builds and CI against a sibling `guard-core-rs` checkout)
-
-## [Unreleased]
-
-### Changed
-
-- 403/413/500 short-circuit responses now carry the bare message (`Suspicious activity detected`, `Payload too large`, `Security check failed`) as `text/plain; charset=utf-8`, matching the Python family's block-response convention, instead of the JSON `{"detail":"..."}` shape
