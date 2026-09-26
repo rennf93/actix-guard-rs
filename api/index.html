@@ -461,6 +461,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-ip-gate-ipgateconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The IP gate: IpGateConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#responses" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -661,6 +672,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-ip-gate-ipgateconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The IP gate: IpGateConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#responses" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -755,6 +777,10 @@ screened before it reaches the wrapped service.</p>
 <tr>
 <td><code>.with_body_cap(body_cap: usize)</code></td>
 <td>Replace the body buffering cap, in bytes. A body larger than the cap is rejected with <code>413</code>. A cap of <code>0</code> rejects every request that carries a non-empty body</td>
+</tr>
+<tr>
+<td><code>.with_ip_gate(ip_gate: IpGateConfig)</code></td>
+<td>Install the global IP gate (see below)</td>
 </tr>
 </tbody>
 </table>
@@ -886,6 +912,37 @@ they are the values the engine conformance corpus records:</p>
 </tbody>
 </table>
 <p>The HTTP method is not scanned.</p>
+<h3 id="the-ip-gate-ipgateconfig">The IP gate: <code>IpGateConfig</code></h3>
+<p>Built with <code>IpGateConfig::new(whitelist, blacklist, exempt_ips)</code>, which fails
+closed on an invalid entry (<code>IpGateError</code> names the list and the entry):</p>
+<div class="highlight"><pre><span></span><code><span class="k">use</span><span class="w"> </span><span class="n">actix_guard_rs</span><span class="p">::{</span><span class="n">GuardTransform</span><span class="p">,</span><span class="w"> </span><span class="n">IpGateConfig</span><span class="p">};</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="n">gate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">IpGateConfig</span><span class="p">::</span><span class="n">new</span><span class="p">(</span>
+<span class="w">    </span><span class="p">[]</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="p">[</span><span class="o">&amp;</span><span class="kt">str</span><span class="p">;</span><span class="w"> </span><span class="mi">0</span><span class="p">],</span>
+<span class="w">    </span><span class="p">[</span><span class="s">"203.0.113.9"</span><span class="p">],</span>
+<span class="w">    </span><span class="p">[</span><span class="s">"198.51.100.7"</span><span class="p">,</span><span class="w"> </span><span class="s">"198.51.100.16/28"</span><span class="p">],</span>
+<span class="p">)</span>
+<span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"valid lists"</span><span class="p">);</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">transform</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GuardTransform</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">actix_guard_rs</span><span class="p">::</span><span class="n">default_config</span><span class="p">()).</span><span class="n">with_ip_gate</span><span class="p">(</span><span class="n">gate</span><span class="p">);</span>
+</code></pre></div>
+<p>Evaluation order mirrors the reference engine: with a non-empty <code>whitelist</code>,
+an IP matching neither the whitelist nor <code>exempt_ips</code> is denied; otherwise a
+<code>blacklist</code> hit is denied. Both denials answer <code>403 Forbidden</code> with
+<code>Forbidden</code> before body buffering. The client IP is the request's peer
+address; a request without one is not attributed, the gate does not run, and
+detection still screens it. A passed request gets an
+<code>IpGateDecision { is_whitelisted, is_exempt }</code> inserted into its request
+extensions so downstream handlers can read the skip state.</p>
+<p><strong>exempt_ips vs whitelist.</strong> <code>exempt_ips</code> is noise reduction for
+known-friendly automation (monitoring probes, VPN egress, a partner's
+server), not immunity: it sets the same skip state a whitelist match sets but
+never adds a deny path and never opens the whitelist gate. The blacklist,
+route rules, and detection still apply to exempt IPs - an attack payload from
+an exempt IP is still <code>403 Suspicious activity detected</code>. The Rust family
+ships no rate limiter, user-agent filter, cloud-provider blocker, or
+violation counter yet; a stage that lands later must skip exactly what the
+reference skips for a whitelist match (<code>is_whitelisted || is_exempt</code>) and
+never skip detection.</p>
 <h3 id="responses">Responses</h3>
 <table>
 <thead>
@@ -896,6 +953,11 @@ they are the values the engine conformance corpus records:</p>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td>The IP gate denies the client IP</td>
+<td><code>403 Forbidden</code></td>
+<td><code>Forbidden</code></td>
+</tr>
 <tr>
 <td>Engine flags a view</td>
 <td><code>403 Forbidden</code></td>
@@ -932,6 +994,10 @@ release profile disables that recovery).</p>
 <td><code>"Suspicious activity detected"</code></td>
 </tr>
 <tr>
+<td><code>FORBIDDEN_MESSAGE</code></td>
+<td><code>"Forbidden"</code></td>
+</tr>
+<tr>
 <td><code>OVERSIZE_MESSAGE</code></td>
 <td><code>"Payload too large"</code></td>
 </tr>
@@ -943,7 +1009,9 @@ release profile disables that recovery).</p>
 </table>
 <h3 id="engine-re-exports">Engine re-exports</h3>
 <p><code>DetectConfig</code>, <code>DetectVerdict</code>, and <code>Threat</code> are re-exported from
-<code>guard_core_engine::detect</code>. A <code>DetectVerdict</code> carries <code>is_threat</code>, a
+<code>guard_core_engine::detect</code>.</p>
+<p><code>IpGateConfig</code>, <code>IpGateDecision</code>, <code>IpGateDenial</code>, <code>IpGateError</code>, and
+<code>IpGateVerdict</code> are re-exported from <code>guard_core_engine::ip_gate</code>. A <code>DetectVerdict</code> carries <code>is_threat</code>, a
 <code>threat_score</code>, and the list of <code>Threat</code> findings (regex or semantic).</p>
 
 
