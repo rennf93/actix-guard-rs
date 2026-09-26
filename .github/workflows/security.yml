@@ -34,8 +34,10 @@ jobs:
       - name: Checkout guard-core-rs (path dependency)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # TEMPORARY pin: body-value extraction lands with rennf93/guard-core-rs#22;
+          # track master again after that merge.
           repository: rennf93/guard-core-rs
-          ref: master
+          ref: feat/body-form-scan-binary-islands
           path: core-checkout
           persist-credentials: false
 
