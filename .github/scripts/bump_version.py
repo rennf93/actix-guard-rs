@@ -57,7 +57,9 @@ def update_root_manifest(version: str) -> bool:
     if current and current.group(1) == version:
         print(f"  Cargo.toml: already set to {version}")
         return True
-    path.write_text(pattern.sub(lambda m: f'{m.group(1)}"{version}"', content, count=1))
+    path.write_text(
+        pattern.sub(lambda m: re.sub(r'"[^"]*"', f'"{version}"', m.group(0)), content, count=1)
+    )
     print(f"  Cargo.toml: updated to {version}")
     return True
 
