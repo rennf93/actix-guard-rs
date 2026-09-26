@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: rennf93/guard-core-rs
-          ref: master
+          ref: feat/body-form-scan-binary-islands
           path: core-checkout
           persist-credentials: false
 
@@ -74,12 +74,15 @@ jobs:
         with:
           persist-credentials: false
 
+      # TEMPORARY pin: the body-value extraction this adapter consumes lives
+      # on the engine's feat/body-form-scan-binary-islands branch until
+      # rennf93/guard-core-rs merges it. Track master again after that merge.
       # Moving branch, same tradeoff as the stable job above.
       - name: Checkout guard-core-rs (path dependency)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: rennf93/guard-core-rs
-          ref: master
+          ref: feat/body-form-scan-binary-islands
           path: core-checkout
           persist-credentials: false
 

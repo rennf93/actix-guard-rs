@@ -4,9 +4,11 @@ use crate::GuardTransform;
 use crate::response;
 use actix_web::body::MessageBody;
 use actix_web::dev::{Payload, Service, ServiceRequest, ServiceResponse};
+use actix_web::http::header;
 use actix_web::{Error, HttpRequest};
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
+use guard_core_engine::body_scan::extract_body_scan_values;
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
@@ -204,12 +206,42 @@ fn scan_views(request: &HttpRequest, body: Option<&Bytes>, transform: &GuardTran
     }
 
     if let Some(bytes) = body {
-        let text = String::from_utf8_lossy(bytes);
-        if !text.trim().is_empty() && flagged(transform, &text, "request_body") {
+        // Content-type routing (urlencoded fields, multipart parts, JSON
+        // walks, blob fallback) happens in the engine; every extracted value
+        // is scanned with its reference context instead of the lossy
+        // whole-body blob.
+        let content_type = request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        if body_flagged(transform, content_type, bytes) {
             return true;
         }
     }
 
+    false
+}
+
+/// Scan the buffered request body through the engine's body-value extraction
+/// (`request_body` view).
+///
+/// Every extracted value goes through the normal detect path with the context
+/// label the reference engine scans it under (`request_body:form_field`,
+/// `request_body:multipart_field`, `:embedded_json` leaves, ...); the first
+/// threat wins. A value with a forced category (a JSON mongo operator key the
+/// reference reports straight from the JSON walk) is a threat outright. An
+/// empty (or whitespace-only) body is not scanned, mirroring the previous
+/// behavior.
+fn body_flagged(transform: &GuardTransform, content_type: Option<&str>, bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    if text.trim().is_empty() {
+        return false;
+    }
+    for value in extract_body_scan_values(&text, content_type.unwrap_or(""), transform.config()) {
+        if value.forced_category.is_some() || flagged(transform, &value.content, &value.context) {
+            return true;
+        }
+    }
     false
 }
 
@@ -317,6 +349,118 @@ mod tests {
             .to_srv_request();
         let response = guard.call(request).await.expect("response");
         assert_eq!(response.status(), 200);
+    }
+
+    // --- body-value extraction through the full service ---
+
+    async fn status_for(request: ServiceRequest) -> actix_web::http::StatusCode {
+        let guard = guarded(GuardTransform::new(default_config())).await;
+        guard.call(request).await.expect("response").status()
+    }
+
+    fn post_request(content_type: &str, payload: &'static [u8]) -> ServiceRequest {
+        TestRequest::post()
+            .uri("/submit")
+            .insert_header(("content-type", content_type))
+            .set_payload(payload)
+            .to_srv_request()
+    }
+
+    #[actix_web::test]
+    async fn sqli_in_a_form_field_is_blocked() {
+        let request = post_request("application/x-www-form-urlencoded", b"q=1+OR+1%3D1");
+        assert_eq!(
+            status_for(request).await,
+            actix_web::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[actix_web::test]
+    async fn backslash_probe_in_a_form_field_is_blocked_through_the_raw_view() {
+        let request = post_request("application/x-www-form-urlencoded", b"q=\\default");
+        assert_eq!(
+            status_for(request).await,
+            actix_web::http::StatusCode::FORBIDDEN,
+            "\\default in a form field must stay a recon probe"
+        );
+    }
+
+    #[actix_web::test]
+    async fn multipart_binary_island_smuggling_is_not_blocked() {
+        // A binary-dense file part whose only printable fragment is shorter
+        // than the minimum island run: no detection, request forwarded.
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--B0\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"installer.zip\"\r\n\r\n");
+        body.extend_from_slice(&noise_bytes(11, 4096));
+        body.extend_from_slice(b"\x001 OR 1=1\x00");
+        body.extend_from_slice(b"\r\n--B0--\r\n");
+
+        let request = post_request("multipart/form-data; boundary=B0", bytes_static(&body));
+        assert_eq!(
+            status_for(request).await,
+            actix_web::http::StatusCode::OK,
+            "the compressed fragment must not pattern-match"
+        );
+    }
+
+    #[actix_web::test]
+    async fn plain_multipart_text_part_with_script_is_blocked() {
+        let request = post_request(
+            "multipart/form-data; boundary=B0",
+            b"--B0\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n<script>alert(1)</script>\r\n--B0--\r\n",
+        );
+        assert_eq!(
+            status_for(request).await,
+            actix_web::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[actix_web::test]
+    async fn embedded_json_leaf_attack_is_blocked() {
+        let request = post_request(
+            "application/x-www-form-urlencoded",
+            br#"data={"a":"<script>alert(1)</script>"}"#,
+        );
+        assert_eq!(
+            status_for(request).await,
+            actix_web::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[actix_web::test]
+    async fn mongo_operator_key_body_is_blocked() {
+        let request = post_request("application/json", br#"{"$where": "1 OR 1=1"}"#);
+        assert_eq!(
+            status_for(request).await,
+            actix_web::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[actix_web::test]
+    async fn benign_multipart_upload_is_forwarded() {
+        let request = post_request(
+            "multipart/form-data; boundary=B0",
+            b"--B0\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"notes.txt\"\r\n\r\nhello world\r\n--B0--\r\n",
+        );
+        assert_eq!(status_for(request).await, actix_web::http::StatusCode::OK);
+    }
+
+    /// Copy `bytes` into a `'static` slice for `set_payload`.
+    fn bytes_static(bytes: &[u8]) -> &'static [u8] {
+        Bytes::copy_from_slice(bytes).to_vec().leak()
+    }
+
+    /// Deterministic pseudo-random bytes: the binary-dense fixture.
+    fn noise_bytes(seed: u64, size: usize) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
+        let mut out = Vec::with_capacity(size);
+        for _ in 0..size {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            out.push(u8::try_from(state % 256).expect("value below 256"));
+        }
+        out
     }
 
     #[test]
