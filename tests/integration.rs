@@ -84,7 +84,7 @@ async fn xss_payload_in_body_is_blocked() {
         .to_request();
 
     let response = call_service(&service, request).await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         response.headers().get(CONTENT_TYPE).expect("content type"),
         "text/plain; charset=utf-8"
@@ -105,7 +105,7 @@ async fn traversal_payload_in_path_is_blocked() {
         .to_request();
 
     let response = call_service(&service, request).await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(body_text(response).await, BLOCKED_MESSAGE);
 }
 
@@ -124,7 +124,7 @@ async fn command_injection_in_query_is_blocked() {
         .to_request();
 
     let response = call_service(&service, request).await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[actix_web::test]
@@ -141,7 +141,7 @@ async fn xss_payload_in_scanned_header_is_blocked() {
         .to_request();
 
     let response = call_service(&service, request).await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[actix_web::test]
@@ -248,7 +248,7 @@ async fn concurrent_requests_are_screened_independently() {
         if index % 2 == 0 {
             assert_eq!(status, StatusCode::OK, "benign request {index}");
         } else {
-            assert_eq!(status, StatusCode::FORBIDDEN, "threat request {index}");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "threat request {index}");
         }
     }
 }

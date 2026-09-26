@@ -18,8 +18,8 @@ A minimal guarded actix-web application
 |---|---|---|
 | `GET /health` | excluded | `200 ok` |
 | `GET /` | guarded | `200` greeting |
-| `GET /search?q=...` | guarded | `200 search ok`, or `403` when the query trips the engine |
-| `POST /echo` | guarded | echoes the body; `403` for a threat, `413` over the body cap |
+| `GET /search?q=...` | guarded | `200 search ok`, or `400` when the query trips the engine |
+| `POST /echo` | guarded | echoes the body; `400` for a threat, `413` over the body cap |
 
 The excluded path is expressed with actix's own scoping: the guarded routes
 live in a `web::scope` that carries the guard middleware, and `/health` is
@@ -60,8 +60,8 @@ configuration, and `GET /health` is registered in front of both guard scopes.
 |---|---|---|
 | `GET /health` | excluded | `200 ok` |
 | `GET /` | general | `200`, greeting text |
-| `GET /search?q=...` | general | `200`, or `403` on a threat |
-| `POST /echo` | general | echoes the body; `403`/`413` from the guard |
+| `GET /search?q=...` | general | `200`, or `400` on a threat |
+| `POST /echo` | general | echoes the body; `400`/`413` from the guard |
 | `GET /admin/stats` | stricter admin guard | screened by a second `GuardTransform` with a lower threat-score threshold |
 
 Run it directly or with the provided Docker setup:

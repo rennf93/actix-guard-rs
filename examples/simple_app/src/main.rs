@@ -7,8 +7,8 @@
 //! |---|---|---|
 //! | `GET /health` | excluded | `200 ok` |
 //! | `GET /` | guarded | `200` greeting |
-//! | `GET /search?q=...` | guarded | `200 search ok`, or `403` when the query trips the engine |
-//! | `POST /echo` | guarded | echoes the body; `403` for a threat, `413` over the body cap |
+//! | `GET /search?q=...` | guarded | `200 search ok`, or `400` when the query trips the engine |
+//! | `POST /echo` | guarded | echoes the body; `400` for a threat, `413` over the body cap |
 //!
 //! The excluded path is expressed with actix's own scoping: the guarded routes
 //! live in a `web::scope` that carries the guard middleware, and `/health` is

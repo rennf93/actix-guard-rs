@@ -78,7 +78,11 @@ reference adapters do not scan the method either.
 
 | Situation | Status | Body |
 |---|---|---|
-| Engine flags a view | `403 Forbidden` | `Suspicious activity detected` |
+| The IP gate denies the client IP | `403 Forbidden` | `Forbidden` |
+| A live ban on the client IP | `403 Forbidden` | `IP address banned` |
+| Rate limit crossed | `429 Too Many Requests` (+ `Retry-After: <window>`) | `Too many requests` |
+| Engine flags a view | `400 Bad Request` | `Suspicious activity detected` |
+| Engine flags a view and a crossed auto-ban threshold bans on the spot | `403 Forbidden` | `IP has been banned` |
 | Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
 | Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
 

@@ -54,13 +54,53 @@ The HTTP method is not fed to the engine: the engine's `detect(content, context,
 
 | Situation | Status | Body |
 |---|---|---|
-| Engine flags a view | `403 Forbidden` | `Suspicious activity detected` |
+| The IP gate denies the client IP | `403 Forbidden` | `Forbidden` |
+| A live ban on the client IP | `403 Forbidden` | `IP address banned` |
+| Rate limit crossed | `429 Too Many Requests` (+ `Retry-After: <window>`) | `Too many requests` |
+| Engine flags a view | `400 Bad Request` | `Suspicious activity detected` |
+| Engine flags a view and a crossed auto-ban threshold bans on the spot | `403 Forbidden` | `IP has been banned` |
 | Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
 | Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
 
 The bodies follow the ecosystem's plain-text error convention (the bare message, `text/plain; charset=utf-8`, same as the Python family), but the adapter is deliberately **fail-secure**: unlike the TypeScript adapters, whose check pipeline logs and skips on error, any failure to complete the security check answers `500`, never an uninspected passthrough.
 
 Engine panics are caught with `catch_unwind` on the worker thread, so a detected panic still produces a response instead of unwinding out of the request future. `panic = "abort"` in the release profile disables that recovery.
+
+
+## Rate limiting and IP banning
+
+Two opt-in builder methods install the engine's stateful stage, mirroring the reference pipeline's order (ban check first, then the limiter, both before body buffering and detection):
+
+```rust
+use actix_guard_rs::{GuardTransform, IpBanConfig, IpBanManager, RateLimitConfig, RateLimiter, ThreatBanEntry};
+
+let limiter = RateLimiter::new(RateLimitConfig {
+    enable_rate_limiting: true,
+    rate_limit: 30,
+    rate_limit_window: 10,
+    ..RateLimitConfig::default()
+})
+.expect("valid config");
+
+let manager = IpBanManager::new();
+let bans = IpBanConfig::new(
+    true,
+    10,
+    3600,
+    [("sqli", ThreatBanEntry { threshold: 3, duration: 1800 })],
+)
+.expect("valid config");
+
+let transform = actix_guard_rs::GuardTransform::new(actix_guard_rs::default_config())
+    .with_rate_limiting(limiter)
+    .with_ip_banning(manager, bans);
+```
+
+- A rate-limit crossing answers `429 Too Many Requests` with `Retry-After: <window seconds>`. With the limiter's `enable_rate_limit_auto_ban` on, every crossing counts one `rate_limit` violation toward the auto-ban engine; the response stays `429` and the ban bites on the next request (`403 IP address banned`).
+- A live ban on the client IP answers `403 Forbidden` (`IP address banned`) before the limiter, so banned traffic never consumes rate budget.
+- Every detected threat counts its categories per client IP; a crossed `threat_ban_config` entry (or the flat `auto_ban_threshold`) bans on the spot, answering `403 Forbidden` (`IP has been banned`). `config.enable_ip_banning = false` counts violations but never bans.
+- Both stages honor the `exempt_ips` contract: whitelisted and exempt IPs are never rate limited, never banned, and never counted; unattributed requests (no peer address) skip the stage but are still detection-screened.
+- The limiter, ban store, and violation counters are shared across all workers through an `Arc`, and the engine handles are cheaply clonable, so out-of-band handles (admin unban endpoints, stats) work alongside the installed transform.
 
 ## Body cap
 

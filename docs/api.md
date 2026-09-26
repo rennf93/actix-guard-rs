@@ -131,18 +131,78 @@ known-friendly automation (monitoring probes, VPN egress, a partner's
 server), not immunity: it sets the same skip state a whitelist match sets but
 never adds a deny path and never opens the whitelist gate. The blacklist,
 route rules, and detection still apply to exempt IPs - an attack payload from
-an exempt IP is still `403 Suspicious activity detected`. The Rust family
-ships no rate limiter, user-agent filter, cloud-provider blocker, or
-violation counter yet; a stage that lands later must skip exactly what the
-reference skips for a whitelist match (`is_whitelisted || is_exempt`) and
-never skip detection.
+an exempt IP is still `400 Suspicious activity detected`. The stateful stages
+(`GuardTransform::with_rate_limiting`, `GuardTransform::with_ip_banning`) skip
+exactly what the reference skips for a whitelist match
+(`is_whitelisted || is_exempt`): rate limiting, violation counting, and
+banning. Detection never skips anything.
+
+### The rate limiter: `RateLimiter`
+
+```rust
+use actix_guard_rs::{GuardTransform, RateLimitConfig, RateLimiter};
+
+let limiter = RateLimiter::new(RateLimitConfig {
+    enable_rate_limiting: true,
+    rate_limit: 30,
+    rate_limit_window: 10,
+    ..RateLimitConfig::default()
+})
+.expect("valid config");
+let transform =
+    GuardTransform::new(actix_guard_rs::default_config()).with_rate_limiting(limiter);
+```
+
+The limiter's constructor fails closed on a zero limit or window. Installed
+with `GuardTransform::with_rate_limiting`, it runs after the IP gate and the
+ban stage, before body buffering and detection: a crossing answers
+`429 Too Many Requests` with `Retry-After: <window seconds>`. With
+`enable_rate_limit_auto_ban` on and IP banning configured, every crossing
+counts one `rate_limit` violation toward the auto-ban engine; the response
+stays `429` and the ban bites on the next request. Requests without a peer
+address cannot be attributed and are not rate limited; detection still
+screens them. The limiter is shared across workers through an `Arc`, and its
+handles are cheaply clonable, so out-of-band handles work alongside it.
+
+### The ban stage: `IpBanManager` + `IpBanConfig`
+
+```rust
+use actix_guard_rs::{GuardTransform, IpBanConfig, IpBanManager, ThreatBanEntry};
+
+let manager = IpBanManager::new();
+let config = IpBanConfig::new(
+    true,
+    10,
+    3600,
+    [("sqli", ThreatBanEntry { threshold: 3, duration: 1800 })],
+)
+.expect("valid config");
+let transform =
+    GuardTransform::new(actix_guard_rs::default_config()).with_ip_banning(manager, config);
+```
+
+The config constructor fails closed on an invalid `threat_ban_config`
+entry. Installed with `GuardTransform::with_ip_banning`, the ban check runs
+before the limiter: a live ban answers `403 Forbidden` (`IP address banned`)
+and banned traffic never consumes rate budget. Every detected threat counts
+its categories per client IP (the reference pipeline's suspicious-activity
+stage), and a crossed `threat_ban_config` entry or the flat
+`auto_ban_threshold` bans on the spot, answering `403 Forbidden`
+(`IP has been banned`); without a crossing the block keeps the
+`400 Bad Request` (`Suspicious activity detected`) shape.
+`config.enable_ip_banning = false` counts violations but never bans.
+Whitelisted and exempt IPs are never counted, so they can never be
+auto-banned. The store pair is shared across workers through an `Arc`.
 
 ### Responses
 
 | Situation | Status | Body |
 |---|---|---|
 | The IP gate denies the client IP | `403 Forbidden` | `Forbidden` |
-| Engine flags a view | `403 Forbidden` | `Suspicious activity detected` |
+| A live ban on the client IP | `403 Forbidden` | `IP address banned` |
+| Rate limit crossed | `429 Too Many Requests` (+ `Retry-After: <window>`) | `Too many requests` |
+| Engine flags a view | `400 Bad Request` | `Suspicious activity detected` |
+| Engine flags a view and a crossed auto-ban threshold bans on the spot | `403 Forbidden` | `IP has been banned` |
 | Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
 | Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
 
@@ -159,6 +219,9 @@ Re-exported refusal message bodies:
 |---|---|
 | `BLOCKED_MESSAGE` | `"Suspicious activity detected"` |
 | `FORBIDDEN_MESSAGE` | `"Forbidden"` |
+| `BANNED_MESSAGE` | `"IP address banned"` |
+| `ACTIVITY_BANNED_MESSAGE` | `"IP has been banned"` |
+| `RATE_LIMITED_MESSAGE` | `"Too many requests"` |
 | `OVERSIZE_MESSAGE` | `"Payload too large"` |
 | `FAILURE_MESSAGE` | `"Security check failed"` |
 
@@ -168,5 +231,12 @@ Re-exported refusal message bodies:
 `guard_core_engine::detect`.
 
 `IpGateConfig`, `IpGateDecision`, `IpGateDenial`, `IpGateError`, and
-`IpGateVerdict` are re-exported from `guard_core_engine::ip_gate`. A `DetectVerdict` carries `is_threat`, a
+`IpGateVerdict` are re-exported from `guard_core_engine::ip_gate`.
+
+`RateLimiter`, `RateLimitConfig`, `RateLimitConfigError`, and
+`RateLimitDecision` are re-exported from `guard_core_engine::rate_limit`.
+
+`IpBanManager`, `IpBanConfig`, `IpBanConfigError`, `BanError`, `BanRecord`,
+`Clock`, `ResolvedBan`, `ThreatBanEntry`, and `ViolationCounters` are
+re-exported from `guard_core_engine::ip_ban`. A `DetectVerdict` carries `is_threat`, a
 `threat_score`, and the list of `Threat` findings (regex or semantic).
