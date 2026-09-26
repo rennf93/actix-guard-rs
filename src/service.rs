@@ -9,8 +9,12 @@ use actix_web::{Error, HttpMessage, HttpRequest};
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use guard_core_engine::body_scan::extract_body_scan_values;
+use guard_core_engine::detect::Threat;
+use guard_core_engine::ip_ban::RATE_LIMIT_CATEGORY;
+use guard_core_engine::ip_gate::IpGateDecision;
 use guard_core_engine::ip_gate::IpGateVerdict;
 use std::future::{Future, poll_fn};
+use std::net::IpAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -86,12 +90,14 @@ enum BufferFailure {
 }
 
 /// The outcome of scanning one request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ScanOutcome {
     /// No view tripped the engine.
     Clean,
-    /// At least one view was flagged as a threat.
-    Threat,
+    /// At least one view was flagged as a threat; the detection categories
+    /// of the first flagged view, deduplicated and sorted (the auto-ban
+    /// engine counts them per client IP).
+    Threat(Vec<String>),
     /// The engine panicked; fail secure.
     Failed,
 }
@@ -122,6 +128,13 @@ where
                 return Ok(response);
             }
 
+            // The stateful stage (dynamic bans, then rate limiting) runs on
+            // every attributed, non-exempt request before a body buffer is
+            // spent on it.
+            if let Some(response) = enforce_state_stage(&request, &transform) {
+                return Ok(response);
+            }
+
             let buffered = match buffer_body(payload, transform.body_cap()).await {
                 Ok(buffered) => buffered,
                 Err(BufferFailure::TooLarge) => return Ok(response::oversize(request)),
@@ -140,7 +153,9 @@ where
                         .await
                         .map(ServiceResponse::map_into_boxed_body)
                 }
-                ScanOutcome::Threat => Ok(response::blocked(request)),
+                ScanOutcome::Threat(categories) => {
+                    Ok(detect_block(&request, &transform, &categories))
+                }
                 ScanOutcome::Failed => Ok(response::failure(request)),
             }
         })
@@ -166,6 +181,102 @@ fn enforce_ip_gate(request: &HttpRequest, transform: &GuardTransform) -> Option<
         }
         IpGateVerdict::Denied(_) => Some(response::forbidden(request.clone())),
     }
+}
+
+/// The client IP, when the request is attributable and not skipped by the
+/// `exempt_ips` contract: the stateful stage's gate.
+///
+/// Unattributed requests cannot be banned, rate limited, or counted (the
+/// stage cannot tell who to hold responsible); whitelisted and exempt IPs
+/// skip exactly what the reference skips for a whitelist match. Detection
+/// applies to both, always.
+fn attributed_and_counting(request: &HttpRequest) -> Option<IpAddr> {
+    let peer = request.peer_addr()?;
+    let decision = request
+        .extensions()
+        .get::<IpGateDecision>()
+        .copied()
+        .unwrap_or_default();
+    if decision.is_whitelisted || decision.is_exempt {
+        return None;
+    }
+    Some(peer.ip())
+}
+
+/// The stateful stage: dynamic bans, then rate limiting, in the reference
+/// pipeline's order (an IP ban check precedes the rate limiter).
+///
+/// Returns the block response when the stage denies the request:
+/// `403 Forbidden` (`IP address banned`) for a live ban,
+/// `429 Too Many Requests` with `Retry-After: <window>` for a crossing.
+fn enforce_state_stage(
+    request: &HttpRequest,
+    transform: &GuardTransform,
+) -> Option<ServiceResponse> {
+    let ip = attributed_and_counting(request)?;
+
+    // Ban check first: a banned IP is denied before its rate window is
+    // touched, so banned traffic neither consumes budget nor counts
+    // violations (the request never reaches the limiter).
+    if let Some(ban) = transform.ban_state()
+        && ban.config.enable_ip_banning
+        && ban.manager.is_banned(ip)
+    {
+        return Some(response::banned_ip(request.clone()));
+    }
+
+    let limiter = transform.rate_limiter()?;
+    let decision = limiter.check(ip, None);
+    if decision.allowed {
+        return None;
+    }
+    // Rate-limit autoban: every active crossing counts one `rate_limit`
+    // violation toward the auto-ban engine (the reference's
+    // `_record_rate_limit_autoban`). The response stays 429; the ban takes
+    // effect on the next request, which the ban stage answers with 403.
+    if limiter.config().enable_rate_limit_auto_ban
+        && let Some(ban) = transform.ban_state()
+    {
+        ban.register_violations(ip, &[RATE_LIMIT_CATEGORY], "rate_limit_exceeded");
+    }
+    Some(response::rate_limited(
+        request.clone(),
+        decision.retry_after(),
+    ))
+}
+
+/// The detection block for one flagged request, with the auto-ban engine
+/// attached: the flagged view's categories count as violations for the
+/// client IP, and a crossed threshold bans on the spot (the reference
+/// pipeline's suspicious-activity stage). Banning configured and fired
+/// answers `IP has been banned`; everything else keeps the family's
+/// `Suspicious activity detected` block shape.
+fn detect_block(
+    request: &HttpRequest,
+    transform: &GuardTransform,
+    categories: &[String],
+) -> ServiceResponse {
+    // Counting is attribute-gated only: the engine's resolution refuses to
+    // ban while the config's enable_ip_banning is off, and the violations
+    // still count (enabling banning later starts from observed history).
+    if let (Some(ban), Some(ip)) = (transform.ban_state(), attributed_and_counting(request)) {
+        let category_refs: Vec<&str> = categories.iter().map(String::as_str).collect();
+        if ban
+            .register_violations(ip, &category_refs, "penetration_attempt")
+            .is_some()
+        {
+            return response::activity_banned(request.clone());
+        }
+    }
+    response::blocked(request.clone())
+}
+
+/// Deduplicate and sort the flagged view's categories: the deterministic
+/// order the auto-ban engine resolves thresholds in (the Go port sorts too).
+fn sort_categories(mut categories: Vec<String>) -> Vec<String> {
+    categories.sort_unstable();
+    categories.dedup();
+    categories
 }
 
 /// Buffer a request body up to `cap` bytes.
@@ -200,23 +311,32 @@ fn scan_request(
     transform: &GuardTransform,
 ) -> ScanOutcome {
     match catch_unwind(AssertUnwindSafe(|| scan_views(request, body, transform))) {
-        Ok(true) => ScanOutcome::Threat,
-        Ok(false) => ScanOutcome::Clean,
+        Ok(ScanOutcome::Threat(categories)) => ScanOutcome::Threat(sort_categories(categories)),
+        Ok(outcome) => outcome,
         Err(_) => ScanOutcome::Failed,
     }
 }
 
 /// One engine call per view, in the documented order: path, query, headers,
-/// body. The first view the engine flags wins.
-fn scan_views(request: &HttpRequest, body: Option<&Bytes>, transform: &GuardTransform) -> bool {
+/// body. The first view the engine flags wins, and its categories are the
+/// violation categories the auto-ban engine counts.
+fn scan_views(
+    request: &HttpRequest,
+    body: Option<&Bytes>,
+    transform: &GuardTransform,
+) -> ScanOutcome {
     let path = request.path();
-    if path != "/" && flagged(transform, path, "url_path") {
-        return true;
+    if path != "/"
+        && let Some(categories) = categories_for(transform, path, "url_path")
+    {
+        return ScanOutcome::Threat(categories);
     }
 
     let query = request.query_string();
-    if !query.is_empty() && flagged(transform, query, "query_param") {
-        return true;
+    if !query.is_empty()
+        && let Some(categories) = categories_for(transform, query, "query_param")
+    {
+        return ScanOutcome::Threat(categories);
     }
 
     for (name, value) in request.headers() {
@@ -229,8 +349,8 @@ fn scan_views(request: &HttpRequest, body: Option<&Bytes>, transform: &GuardTran
         let Ok(value) = value.to_str() else {
             continue;
         };
-        if flagged(transform, value, "header") {
-            return true;
+        if let Some(categories) = categories_for(transform, value, "header") {
+            return ScanOutcome::Threat(categories);
         }
     }
 
@@ -243,12 +363,12 @@ fn scan_views(request: &HttpRequest, body: Option<&Bytes>, transform: &GuardTran
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok());
-        if body_flagged(transform, content_type, bytes) {
-            return true;
+        if let Some(categories) = body_categories(transform, content_type, bytes) {
+            return ScanOutcome::Threat(categories);
         }
     }
 
-    false
+    ScanOutcome::Clean
 }
 
 /// Scan the buffered request body through the engine's body-value extraction
@@ -261,22 +381,44 @@ fn scan_views(request: &HttpRequest, body: Option<&Bytes>, transform: &GuardTran
 /// reference reports straight from the JSON walk) is a threat outright. An
 /// empty (or whitespace-only) body is not scanned, mirroring the previous
 /// behavior.
-fn body_flagged(transform: &GuardTransform, content_type: Option<&str>, bytes: &[u8]) -> bool {
+fn body_categories(
+    transform: &GuardTransform,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Option<Vec<String>> {
     let text = String::from_utf8_lossy(bytes);
     if text.trim().is_empty() {
-        return false;
+        return None;
     }
     for value in extract_body_scan_values(&text, content_type.unwrap_or(""), transform.config()) {
-        if value.forced_category.is_some() || flagged(transform, &value.content, &value.context) {
-            return true;
+        if let Some(forced) = value.forced_category {
+            return Some(vec![forced.to_owned()]);
+        }
+        if let Some(categories) = categories_for(transform, &value.content, &value.context) {
+            return Some(categories);
         }
     }
-    false
+    None
 }
 
-/// One engine call: `true` when the engine flags the content.
-fn flagged(transform: &GuardTransform, content: &str, view: &str) -> bool {
-    (transform.detect_fn())(content, view, transform.config()).is_threat
+/// One engine call: the flagged view's threat categories, or `None` when the
+/// engine clears the content. Regex threats carry the pattern table's
+/// category; semantic threats carry their attack type.
+fn categories_for(transform: &GuardTransform, content: &str, view: &str) -> Option<Vec<String>> {
+    let verdict = (transform.detect_fn())(content, view, transform.config());
+    if !verdict.is_threat {
+        return None;
+    }
+    Some(
+        verdict
+            .threats
+            .iter()
+            .map(|threat| match threat {
+                Threat::Regex(regex) => regex.category.clone(),
+                Threat::Semantic(semantic) => semantic.attack_type.clone(),
+            })
+            .collect(),
+    )
 }
 
 fn is_excluded_header(name: &str) -> bool {
@@ -332,9 +474,26 @@ mod tests {
             .to_http_request();
         assert_eq!(
             scan_request(&request, None, &transform),
-            ScanOutcome::Threat,
-            "traversal path should be flagged"
+            ScanOutcome::Threat(vec!["dir_traversal".to_owned()]),
+            "traversal path should be flagged with its category"
         );
+    }
+
+    #[actix_web::test]
+    async fn scan_views_sorts_and_dedups_categories() {
+        let transform = GuardTransform::new(default_config());
+        // `SELECT * FROM users` in a body view yields two sqli rows; the
+        // outcome carries the category once.
+        let request = TestRequest::post()
+            .uri("/submit")
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .to_http_request();
+        let outcome = scan_request(
+            &request,
+            Some(&Bytes::from_static(b"SELECT * FROM users")),
+            &transform,
+        );
+        assert_eq!(outcome, ScanOutcome::Threat(vec!["sqli".to_owned()]));
     }
 
     #[actix_web::test]
@@ -722,6 +881,342 @@ mod tests {
             gate.evaluate(mapped),
             IpGateVerdict::Allowed(decision) if decision.is_exempt
         ));
+    }
+
+    // --- the stateful stage: rate limiting, bans, auto-ban ---
+
+    use crate::{
+        ACTIVITY_BANNED_MESSAGE, BANNED_MESSAGE, IpBanConfig, IpBanManager, RATE_LIMITED_MESSAGE,
+        RateLimitConfig, RateLimiter, ThreatBanEntry,
+    };
+    use actix_web::http::StatusCode;
+    use actix_web::http::header::RETRY_AFTER;
+    use guard_core_engine::ip_ban::Clock;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// The empty `threat_ban_config`, typed so the `new` calls stay inferable.
+    fn no_entries() -> Vec<(String, ThreatBanEntry)> {
+        Vec::new()
+    }
+
+    /// An enabled rate limiter with the given limit and auto-ban switch.
+    fn limiter(limit: u32, auto_ban: bool) -> RateLimiter {
+        RateLimiter::new(RateLimitConfig {
+            enable_rate_limiting: true,
+            rate_limit: limit,
+            rate_limit_window: 60,
+            enable_rate_limit_auto_ban: auto_ban,
+        })
+        .expect("valid config")
+    }
+
+    /// A fake clock (unix seconds starting at `1_000`) plus its handle, for
+    /// deterministic ban-expiry coverage.
+    fn fake_clock() -> (Clock, Arc<AtomicU64>) {
+        let state = Arc::new(AtomicU64::new(1_000));
+        let clock: Clock = {
+            let seconds = state.clone();
+            #[allow(clippy::cast_precision_loss)]
+            Arc::new(move || seconds.load(Ordering::Relaxed) as f64)
+        };
+        (clock, state)
+    }
+
+    /// Status, body, and the `Retry-After` header of one guarded request.
+    async fn full_status(
+        transform: GuardTransform,
+        request: ServiceRequest,
+    ) -> (StatusCode, String, Option<String>) {
+        let guard = guarded(transform).await;
+        let response = guard.call(request).await.expect("response");
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .map(|value| value.to_str().expect("ascii header").to_owned());
+        (status, body_text(response), retry_after)
+    }
+
+    fn benign_request(ip: &str) -> ServiceRequest {
+        attributed("/hello", ip)
+    }
+
+    fn attack_request(ip: &str) -> ServiceRequest {
+        attributed("/files/../../etc/passwd", ip)
+    }
+
+    #[actix_web::test]
+    async fn rate_limit_crossing_is_blocked_429_with_retry_after() {
+        let transform = GuardTransform::new(default_config()).with_rate_limiting(limiter(2, false));
+        for _ in 0..2 {
+            let (status, _, retry_after) =
+                full_status(transform.clone(), benign_request("192.0.2.55")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(retry_after, None, "allowed requests carry no Retry-After");
+        }
+        let (status, body, retry_after) =
+            full_status(transform, benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body, RATE_LIMITED_MESSAGE);
+        assert_eq!(
+            retry_after.as_deref(),
+            Some("60"),
+            "Retry-After is the window"
+        );
+    }
+
+    #[actix_web::test]
+    async fn exempt_ip_exceeds_the_limit_and_still_gets_200() {
+        // Checklist: the exempt flag is observable - exemption skips rate
+        // limiting exactly like a whitelist match.
+        let gate = crate::IpGateConfig::new(NIL, NIL, ["198.51.100.7"]).expect("valid lists");
+        let transform = GuardTransform::new(default_config())
+            .with_ip_gate(gate)
+            .with_rate_limiting(limiter(1, false));
+        for _ in 0..5 {
+            let (status, _, _) =
+                full_status(transform.clone(), benign_request("198.51.100.7")).await;
+            assert_eq!(status, StatusCode::OK, "exempt IPs are never rate limited");
+        }
+        // A non-exempt peer under the same config is limited as usual.
+        let (status, _, retry_after) =
+            full_status(transform.clone(), benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, _) = full_status(transform, benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(retry_after, None);
+    }
+
+    #[actix_web::test]
+    async fn whitelisted_ip_is_also_skipped_by_the_limiter() {
+        let gate = crate::IpGateConfig::new(["198.51.100.7"], NIL, NIL).expect("valid lists");
+        let transform = GuardTransform::new(default_config())
+            .with_ip_gate(gate)
+            .with_rate_limiting(limiter(1, false));
+        for _ in 0..5 {
+            let (status, _, _) =
+                full_status(transform.clone(), benign_request("198.51.100.7")).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "whitelist match skips rate limiting"
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn unattributed_requests_are_not_rate_limited() {
+        let transform = GuardTransform::new(default_config()).with_rate_limiting(limiter(1, false));
+        for _ in 0..5 {
+            let request = TestRequest::get().uri("/hello").to_srv_request();
+            let (status, _, _) = full_status(transform.clone(), request).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+    }
+
+    #[actix_web::test]
+    async fn banned_ip_is_blocked_with_the_banned_body() {
+        let manager = IpBanManager::new();
+        let config = IpBanConfig::new(true, 10, 3600, no_entries()).expect("valid config");
+        let transform =
+            GuardTransform::new(default_config()).with_ip_banning(manager.clone(), config);
+        // Ban out of band through the shared handle (an operator or the
+        // auto-ban engine did it).
+        manager
+            .ban_ip(IpAddr::from_str("192.0.2.55").expect("ip"), 60, "operator")
+            .expect("ban");
+        let (status, body, _) = full_status(transform.clone(), benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, BANNED_MESSAGE);
+
+        // Other IPs are untouched.
+        let (status, _, _) = full_status(transform, benign_request("192.0.2.56")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn ban_expiry_is_honored_for_a_short_duration() {
+        let (clock, seconds) = fake_clock();
+        let manager = IpBanManager::with_clock(clock);
+        let config = IpBanConfig::new(true, 10, 3600, no_entries()).expect("valid config");
+        let transform =
+            GuardTransform::new(default_config()).with_ip_banning(manager.clone(), config);
+        manager
+            .ban_ip(IpAddr::from_str("192.0.2.55").expect("ip"), 5, "short")
+            .expect("ban");
+        let (status, body, _) = full_status(transform.clone(), benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, BANNED_MESSAGE);
+
+        seconds.store(1_000 + 6, Ordering::Relaxed);
+        let (status, _, _) = full_status(transform, benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::OK, "the ban expired");
+    }
+
+    #[actix_web::test]
+    async fn banned_ip_blocks_before_detection_and_rate_limiting() {
+        let manager = IpBanManager::new();
+        let config = IpBanConfig::new(true, 10, 3600, no_entries()).expect("valid config");
+        let transform = GuardTransform::new(default_config())
+            .with_rate_limiting(limiter(1, false))
+            .with_ip_banning(manager.clone(), config);
+        manager
+            .ban_ip(IpAddr::from_str("192.0.2.55").expect("ip"), 60, "operator")
+            .expect("ban");
+        // An attack from the banned IP: the ban stage wins over the
+        // detection block shape...
+        let (status, body, _) = full_status(transform.clone(), attack_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, BANNED_MESSAGE);
+        // ...and over the rate limiter: banned traffic never consumes budget.
+        let (status, body, _) = full_status(transform, attack_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, BANNED_MESSAGE);
+    }
+
+    #[actix_web::test]
+    async fn detection_violations_ban_at_the_category_threshold() {
+        let config = IpBanConfig::new(
+            true,
+            100,
+            3600,
+            [(
+                "dir_traversal",
+                ThreatBanEntry {
+                    threshold: 2,
+                    duration: 60,
+                },
+            )],
+        )
+        .expect("valid config");
+        let transform =
+            GuardTransform::new(default_config()).with_ip_banning(IpBanManager::new(), config);
+
+        // First violation: the plain block shape.
+        let (status, body, _) = full_status(transform.clone(), attack_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, BLOCKED_MESSAGE);
+        // Second violation crosses the entry: banned on the spot.
+        let (status, body, _) = full_status(transform.clone(), attack_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, ACTIVITY_BANNED_MESSAGE);
+        // From then on the ban stage answers everything.
+        let (status, body, _) = full_status(transform, benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, BANNED_MESSAGE);
+    }
+
+    #[actix_web::test]
+    async fn enable_ip_banning_false_never_bans() {
+        let config = IpBanConfig::new(
+            false,
+            1,
+            3600,
+            [(
+                "dir_traversal",
+                ThreatBanEntry {
+                    threshold: 1,
+                    duration: 60,
+                },
+            )],
+        )
+        .expect("valid config");
+        let transform =
+            GuardTransform::new(default_config()).with_ip_banning(IpBanManager::new(), config);
+        for _ in 0..3 {
+            let (status, body, _) =
+                full_status(transform.clone(), attack_request("192.0.2.55")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body, BLOCKED_MESSAGE,
+                "banning is off: the plain block shape"
+            );
+        }
+        let (status, _, _) = full_status(transform, benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::OK, "nobody was banned");
+    }
+
+    #[actix_web::test]
+    async fn exempt_ip_never_counts_detection_violations() {
+        // Checklist: the exempt flag makes violation counting observable -
+        // an exempt attacker can never be auto-banned.
+        let gate = crate::IpGateConfig::new(NIL, NIL, ["198.51.100.7"]).expect("valid lists");
+        let config = IpBanConfig::new(
+            true,
+            1,
+            3600,
+            [(
+                "dir_traversal",
+                ThreatBanEntry {
+                    threshold: 1,
+                    duration: 60,
+                },
+            )],
+        )
+        .expect("valid config");
+        let transform = GuardTransform::new(default_config())
+            .with_ip_gate(gate)
+            .with_ip_banning(IpBanManager::new(), config);
+        for _ in 0..3 {
+            let (status, body, _) =
+                full_status(transform.clone(), attack_request("198.51.100.7")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body, BLOCKED_MESSAGE,
+                "exempt violations are not counted, so no ban can fire"
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn rate_limit_autoban_is_off_by_default() {
+        let config = IpBanConfig::new(true, 1, 3600, no_entries()).expect("valid config");
+        let transform = GuardTransform::new(default_config())
+            .with_rate_limiting(limiter(1, false))
+            .with_ip_banning(IpBanManager::new(), config);
+        let (status, _, _) = full_status(transform.clone(), benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::OK);
+        for _ in 0..5 {
+            let (status, body, _) =
+                full_status(transform.clone(), benign_request("192.0.2.55")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(body, RATE_LIMITED_MESSAGE, "crossings stay rate limited");
+        }
+    }
+
+    #[actix_web::test]
+    async fn rate_limit_autoban_bans_at_the_threshold() {
+        let config = IpBanConfig::new(
+            true,
+            100,
+            3600,
+            [(
+                "rate_limit",
+                ThreatBanEntry {
+                    threshold: 2,
+                    duration: 30,
+                },
+            )],
+        )
+        .expect("valid config");
+        let transform = GuardTransform::new(default_config())
+            .with_rate_limiting(limiter(1, true))
+            .with_ip_banning(IpBanManager::new(), config);
+        let (status, _, _) = full_status(transform.clone(), benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::OK);
+        // First crossing: violation 1, below the entry threshold.
+        let (status, body, _) = full_status(transform.clone(), benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body, RATE_LIMITED_MESSAGE);
+        // Second crossing: violation 2 crosses the entry, the ban fires (the
+        // response of this request is still the 429 it earned).
+        let (status, _, _) = full_status(transform.clone(), benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        // From then on the ban stage answers first.
+        let (status, body, _) = full_status(transform, benign_request("192.0.2.55")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, BANNED_MESSAGE);
     }
 
     /// A body that yields one frame, then errors.

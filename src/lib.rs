@@ -66,17 +66,23 @@
 //! | Situation | Status | Body |
 //! |---|---|---|
 //! | The IP gate denies the client IP (blacklisted, or a non-empty whitelist matches neither the IP nor an exemption) | `403 Forbidden` | `Forbidden` |
+//! | The ban stage finds a live ban on the client IP | `403 Forbidden` | `IP address banned` |
+//! | The rate limiter records a crossing of `rate_limit` | `429 Too Many Requests` (+ `Retry-After: <window>`) | `Too many requests` |
 //! | Engine flags a view | `400 Bad Request` | `Suspicious activity detected` |
+//! | Engine flags a view and the crossed auto-ban threshold bans on the spot | `403 Forbidden` | `IP has been banned` |
 //! | Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
 //! | Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
 //!
 //! The IP gate is optional (`GuardTransform::with_ip_gate`); when it is
 //! configured, `exempt_ips` (like a whitelist match) only sets the skip state
 //! on the request, never a deny path of its own - the exempt-vs-whitelist
-//! contract in the engine's `ip_gate` module. The Rust family ships no rate
-//! limiter, user-agent filter, cloud-provider blocker, or violation counter
-//! yet, so there is nothing for the flag to skip; detection always scans
-//! every request, exempt or not, per the contract.
+//! contract in the engine's `ip_gate` module. The stateful stages honor that
+//! contract: the rate limiter (`GuardTransform::with_rate_limiting`) and the
+//! ban/auto-ban stage (`GuardTransform::with_ip_banning`) skip whitelisted and
+//! exempt IPs for exactly what the reference skips (rate limiting, violation
+//! counting, banning) and never skip detection, which always scans every
+//! request, exempt or not. A user-agent filter and cloud-provider blocking
+//! do not exist yet.
 //!
 //! These bodies follow the ecosystem's plain-text convention (the bare
 //! message, `text/plain; charset=utf-8`, same as the Python family) but
@@ -129,12 +135,25 @@ use actix_web::Error;
 use actix_web::body::MessageBody;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 pub use guard_core_engine::detect::{DetectConfig, DetectVerdict, Threat};
+pub use guard_core_engine::ip_ban::{
+    BanError, BanRecord, Clock, IpBanConfig, IpBanConfigError, IpBanManager, ResolvedBan,
+    ThreatBanEntry, ViolationCounters,
+};
 pub use guard_core_engine::ip_gate::{
     IpGateConfig, IpGateDecision, IpGateDenial, IpGateError, IpGateVerdict,
 };
+pub use guard_core_engine::rate_limit::{
+    RateLimitConfig, RateLimitConfigError, RateLimitDecision, RateLimiter,
+};
 
-pub use crate::response::{BLOCKED_MESSAGE, FAILURE_MESSAGE, FORBIDDEN_MESSAGE, OVERSIZE_MESSAGE};
+pub use crate::response::{
+    ACTIVITY_BANNED_MESSAGE, BANNED_MESSAGE, BLOCKED_MESSAGE, FAILURE_MESSAGE, FORBIDDEN_MESSAGE,
+    OVERSIZE_MESSAGE, RATE_LIMITED_MESSAGE,
+};
 pub use crate::service::GuardService;
+
+use std::net::IpAddr;
+use std::sync::Arc;
 
 /// Reference default detection configuration.
 ///
@@ -177,6 +196,38 @@ pub const fn default_config() -> DetectConfig {
 /// [`guard_core_engine::detect::detect`].
 pub(crate) type DetectFn = fn(&str, &str, &DetectConfig) -> DetectVerdict;
 
+/// The stateful stage's ban half: the shared ban store, the shared violation
+/// counters (one middleware instance = one store pair), and the config that
+/// gates banning and threshold resolution.
+pub(crate) struct BanState {
+    manager: IpBanManager,
+    counters: ViolationCounters,
+    config: IpBanConfig,
+}
+
+impl core::fmt::Debug for BanState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BanState")
+            .field("manager", &self.manager)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BanState {
+    /// The auto-ban engine's one-call shape: count the categories, resolve
+    /// the thresholds, ban when one crossed.
+    pub(crate) fn register_violations(
+        &self,
+        ip: IpAddr,
+        categories: &[&str],
+        reason: &str,
+    ) -> Option<ResolvedBan> {
+        self.manager
+            .register_violations(&self.counters, ip, categories, &self.config, reason)
+    }
+}
+
 /// Screens actix Web requests with the Guard engine before they reach the
 /// wrapped service.
 ///
@@ -196,6 +247,8 @@ pub struct GuardTransform {
     config: DetectConfig,
     body_cap: usize,
     ip_gate: Option<IpGateConfig>,
+    rate_limiter: Option<Arc<RateLimiter>>,
+    ban_state: Option<Arc<BanState>>,
     detect_fn: DetectFn,
 }
 
@@ -203,14 +256,18 @@ impl GuardTransform {
     /// Build a transform from an engine [`DetectConfig`].
     ///
     /// The body buffering cap starts at `config.max_full_scan_bytes`, and no
-    /// IP gate is configured (one can be added with
-    /// [`GuardTransform::with_ip_gate`]).
+    /// IP gate, rate limiter, or ban store is configured (each can be added
+    /// with [`GuardTransform::with_ip_gate`],
+    /// [`GuardTransform::with_rate_limiting`], and
+    /// [`GuardTransform::with_ip_banning`]).
     #[must_use]
     pub fn new(config: DetectConfig) -> Self {
         Self {
             config,
             body_cap: config.max_full_scan_bytes,
             ip_gate: None,
+            rate_limiter: None,
+            ban_state: None,
             detect_fn: guard_core_engine::detect::detect,
         }
     }
@@ -274,6 +331,100 @@ impl GuardTransform {
         self
     }
 
+    /// Install the rate limiter: an engine [`RateLimiter`] built over a
+    /// [`RateLimitConfig`] (whose constructor fails closed on a zero limit or
+    /// window). The limiter's own `enable_rate_limiting` switch decides
+    /// whether it records and blocks, so attaching a disabled limiter is
+    /// inert.
+    ///
+    /// The limiter stage runs after the IP gate and the ban stage and before
+    /// body buffering and detection: a crossing is answered with
+    /// `429 Too Many Requests` carrying `Retry-After: <window seconds>`,
+    /// the references' rate-limit shape. When the limiter's
+    /// `enable_rate_limit_auto_ban` is on and IP banning is configured
+    /// ([`GuardTransform::with_ip_banning`]), every crossing counts one
+    /// `rate_limit` violation toward the auto-ban engine. Both stages skip
+    /// whitelisted and exempt IPs (the `exempt_ips` contract), and requests
+    /// without a peer address cannot be attributed and are not rate
+    /// limited - detection still screens them.
+    ///
+    /// The transform applies to every worker, and the workers share the one
+    /// limiter through an `Arc`: the window store is process-global by
+    /// design, exactly like the reference's middleware-scoped store.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use actix_guard_rs::{GuardTransform, RateLimitConfig, RateLimiter};
+    ///
+    /// let limiter = RateLimiter::new(RateLimitConfig {
+    ///     enable_rate_limiting: true,
+    ///     rate_limit: 30,
+    ///     rate_limit_window: 10,
+    ///     ..RateLimitConfig::default()
+    /// })
+    /// .expect("valid config");
+    /// let transform =
+    ///     GuardTransform::new(actix_guard_rs::default_config()).with_rate_limiting(limiter);
+    /// # let _ = transform;
+    /// ```
+    #[must_use]
+    pub fn with_rate_limiting(mut self, limiter: RateLimiter) -> Self {
+        self.rate_limiter = Some(Arc::new(limiter));
+        self
+    }
+
+    /// Install the dynamic ban store and the auto-ban engine: an
+    /// [`IpBanManager`] (optionally built with trusted proxies via
+    /// `IpBanManager::with_trusted_proxies`) and an [`IpBanConfig`]
+    /// (whose constructor fails closed on an invalid `threat_ban_config`).
+    ///
+    /// The ban stage runs after the IP gate and before body buffering and
+    /// detection: a live ban on the client IP is answered with
+    /// `403 Forbidden` (`IP address banned`), before rate limiting. The
+    /// stage's violation counters feed the auto-ban engine exactly like the
+    /// reference pipeline's suspicious-activity stage: every detected
+    /// threat counts its categories per client IP (exempt and whitelisted
+    /// IPs never count - the `exempt_ips` contract), and a crossed
+    /// `threat_ban_config` entry (or the flat `auto_ban_threshold`)
+    /// bans on the spot, answering `403 Forbidden` (`IP has been banned`).
+    /// The `config.enable_ip_banning` switch gates all of it; with it off
+    /// the stage counts violations but never bans.
+    ///
+    /// Requests without a peer address cannot be attributed and are neither
+    /// banned nor counted.
+    ///
+    /// The transform applies to every worker, and the workers share the one
+    /// store pair through an `Arc`: bans and counts are process-global by
+    /// design, exactly like the reference's middleware-scoped stores.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use actix_guard_rs::{GuardTransform, IpBanConfig, IpBanManager, ThreatBanEntry};
+    ///
+    /// let manager = IpBanManager::new();
+    /// let config = IpBanConfig::new(
+    ///     true,
+    ///     10,
+    ///     3600,
+    ///     [("sqli", ThreatBanEntry { threshold: 3, duration: 1800 })],
+    /// )
+    /// .expect("valid config");
+    /// let transform =
+    ///     GuardTransform::new(actix_guard_rs::default_config()).with_ip_banning(manager, config);
+    /// # let _ = transform;
+    /// ```
+    #[must_use]
+    pub fn with_ip_banning(mut self, manager: IpBanManager, config: IpBanConfig) -> Self {
+        self.ban_state = Some(Arc::new(BanState {
+            manager,
+            counters: ViolationCounters::new(),
+            config,
+        }));
+        self
+    }
+
     pub(crate) const fn config(&self) -> &DetectConfig {
         &self.config
     }
@@ -284,6 +435,14 @@ impl GuardTransform {
 
     pub(crate) const fn ip_gate(&self) -> Option<&IpGateConfig> {
         self.ip_gate.as_ref()
+    }
+
+    pub(crate) fn rate_limiter(&self) -> Option<&RateLimiter> {
+        self.rate_limiter.as_deref()
+    }
+
+    pub(crate) fn ban_state(&self) -> Option<&BanState> {
+        self.ban_state.as_deref()
     }
 
     pub(crate) const fn detect_fn(&self) -> DetectFn {

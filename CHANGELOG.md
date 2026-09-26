@@ -4,6 +4,14 @@ All notable changes to this project.
 
 ## [Unreleased]
 
+### Added
+
+- Stateful stage (rate limiting, dynamic bans, auto-ban) over the engine's `rate_limit` and `ip_ban` modules, mirroring the tower reference implementation:
+  - `GuardTransform::with_rate_limiting(RateLimiter)`: the sliding-window limiter runs after the IP gate and the ban check, before body buffering - a crossing answers `429 Too Many Requests` with `Retry-After: <window seconds>`, the references' rate-limit shape. With the limiter's `enable_rate_limit_auto_ban` on, every crossing counts one `rate_limit` violation toward the auto-ban engine (`threat_ban_config["rate_limit"]` first, then the flat threshold), the reference pipeline's `_record_rate_limit_autoban`
+  - `GuardTransform::with_ip_banning(IpBanManager, IpBanConfig)`: a live ban answers `403 Forbidden` (`IP address banned`) before the limiter, so banned traffic never consumes rate budget; every detected threat counts its categories per client IP (the reference pipeline's suspicious-activity stage) and a crossed `threat_ban_config` entry or the flat `auto_ban_threshold` bans on the spot, answering `403 Forbidden` (`IP has been banned`); `config.enable_ip_banning = false` counts violations but never bans; the plain detection block keeps the reference suspicious-activity stage's `400 Bad Request` (`Suspicious activity detected`) shape
+  - both stages honor the `exempt_ips` contract: whitelisted and exempt IPs are never rate limited, never banned (ban stage), and never have violations counted - which makes `exempt_ips` observable under load; unattributed requests (no peer address) cannot be held responsible and skip the stage, detection still screens them
+  - the limiter, ban store, and violation counters are shared across all workers through an `Arc`, and `RateLimiter`, `IpBanManager`, and `ViolationCounters` are cheaply clonable and clone-share their stores, so out-of-band handles (admin unban endpoints, stats) work alongside the installed transform
+
 ### Changed
 
 - Detection blocks answer `400 Bad Request` (`Suspicious activity detected`) instead of `403 Forbidden`, matching the reference suspicious-activity stage's status and the rest of the Rust family (the IP gate's `403 Forbidden` and the fail-secure `500` are unchanged)
