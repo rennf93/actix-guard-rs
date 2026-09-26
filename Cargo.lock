@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "actix-guard-rs"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "actix-web",
  "bytes",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "guard-core-engine"
-version = "4.0.4"
+version = "4.1.0"
 dependencies = [
  "html-escape",
  "lru",
