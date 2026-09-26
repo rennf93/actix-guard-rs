@@ -65,9 +65,18 @@
 //!
 //! | Situation | Status | Body |
 //! |---|---|---|
+//! | The IP gate denies the client IP (blacklisted, or a non-empty whitelist matches neither the IP nor an exemption) | `403 Forbidden` | `Forbidden` |
 //! | Engine flags a view | `403 Forbidden` | `Suspicious activity detected` |
 //! | Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
 //! | Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
+//!
+//! The IP gate is optional (`GuardTransform::with_ip_gate`); when it is
+//! configured, `exempt_ips` (like a whitelist match) only sets the skip state
+//! on the request, never a deny path of its own - the exempt-vs-whitelist
+//! contract in the engine's `ip_gate` module. The Rust family ships no rate
+//! limiter, user-agent filter, cloud-provider blocker, or violation counter
+//! yet, so there is nothing for the flag to skip; detection always scans
+//! every request, exempt or not, per the contract.
 //!
 //! These bodies follow the ecosystem's plain-text convention (the bare
 //! message, `text/plain; charset=utf-8`, same as the Python family) but
@@ -120,8 +129,11 @@ use actix_web::Error;
 use actix_web::body::MessageBody;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 pub use guard_core_engine::detect::{DetectConfig, DetectVerdict, Threat};
+pub use guard_core_engine::ip_gate::{
+    IpGateConfig, IpGateDecision, IpGateDenial, IpGateError, IpGateVerdict,
+};
 
-pub use crate::response::{BLOCKED_MESSAGE, FAILURE_MESSAGE, OVERSIZE_MESSAGE};
+pub use crate::response::{BLOCKED_MESSAGE, FAILURE_MESSAGE, FORBIDDEN_MESSAGE, OVERSIZE_MESSAGE};
 pub use crate::service::GuardService;
 
 /// Reference default detection configuration.
@@ -183,18 +195,22 @@ pub(crate) type DetectFn = fn(&str, &str, &DetectConfig) -> DetectVerdict;
 pub struct GuardTransform {
     config: DetectConfig,
     body_cap: usize,
+    ip_gate: Option<IpGateConfig>,
     detect_fn: DetectFn,
 }
 
 impl GuardTransform {
     /// Build a transform from an engine [`DetectConfig`].
     ///
-    /// The body buffering cap starts at `config.max_full_scan_bytes`.
+    /// The body buffering cap starts at `config.max_full_scan_bytes`, and no
+    /// IP gate is configured (one can be added with
+    /// [`GuardTransform::with_ip_gate`]).
     #[must_use]
     pub fn new(config: DetectConfig) -> Self {
         Self {
             config,
             body_cap: config.max_full_scan_bytes,
+            ip_gate: None,
             detect_fn: guard_core_engine::detect::detect,
         }
     }
@@ -224,12 +240,50 @@ impl GuardTransform {
         self
     }
 
+    /// Install the global IP gate: a `whitelist`/`blacklist`/`exempt_ips`
+    /// config built with [`IpGateConfig::new`] (which fails closed on an
+    /// invalid entry).
+    ///
+    /// The gate runs before body buffering and before detection: an IP on the
+    /// `blacklist` is denied with `403 Forbidden`, and so is any IP when a
+    /// non-empty `whitelist` matches neither it nor an `exempt_ips` entry. A
+    /// passed request gets the gate's [`IpGateDecision`] inserted into the
+    /// request extensions, so downstream handlers can read the skip state
+    /// (`is_whitelisted` / `is_exempt`). The client IP is the request's peer
+    /// address; a request without one is not attributed and goes through
+    /// detection unconditionally - detection still screens every request,
+    /// exempt or not.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use actix_guard_rs::{GuardTransform, IpGateConfig};
+    ///
+    /// let gate = IpGateConfig::new(
+    ///     [] as [&str; 0],
+    ///     ["203.0.113.9"],
+    ///     ["198.51.100.0/28"],
+    /// )
+    /// .expect("valid lists");
+    /// let transform = GuardTransform::new(actix_guard_rs::default_config()).with_ip_gate(gate);
+    /// # let _ = transform;
+    /// ```
+    #[must_use]
+    pub fn with_ip_gate(mut self, ip_gate: IpGateConfig) -> Self {
+        self.ip_gate = Some(ip_gate);
+        self
+    }
+
     pub(crate) const fn config(&self) -> &DetectConfig {
         &self.config
     }
 
     pub(crate) const fn body_cap(&self) -> usize {
         self.body_cap
+    }
+
+    pub(crate) const fn ip_gate(&self) -> Option<&IpGateConfig> {
+        self.ip_gate.as_ref()
     }
 
     pub(crate) const fn detect_fn(&self) -> DetectFn {

@@ -29,6 +29,7 @@ Constructors and builders:
 | `GuardTransform::new(config: DetectConfig)` | Build a transform from an engine `DetectConfig`. The body buffering cap starts at `config.max_full_scan_bytes` |
 | `GuardTransform::with_defaults()` | Build a transform with `default_config()` |
 | `.with_body_cap(body_cap: usize)` | Replace the body buffering cap, in bytes. A body larger than the cap is rejected with `413`. A cap of `0` rejects every request that carries a non-empty body |
+| `.with_ip_gate(ip_gate: IpGateConfig)` | Install the global IP gate (see below) |
 
 The transform clones into a per-worker `GuardService`; actix Web builds its
 service tree per worker on single-threaded event loops, and the wrapped
@@ -99,10 +100,48 @@ One engine call per request view:
 
 The HTTP method is not scanned.
 
+### The IP gate: `IpGateConfig`
+
+Built with `IpGateConfig::new(whitelist, blacklist, exempt_ips)`, which fails
+closed on an invalid entry (`IpGateError` names the list and the entry):
+
+```rust
+use actix_guard_rs::{GuardTransform, IpGateConfig};
+
+let gate = IpGateConfig::new(
+    [] as [&str; 0],
+    ["203.0.113.9"],
+    ["198.51.100.7", "198.51.100.16/28"],
+)
+.expect("valid lists");
+let transform = GuardTransform::new(actix_guard_rs::default_config()).with_ip_gate(gate);
+```
+
+Evaluation order mirrors the reference engine: with a non-empty `whitelist`,
+an IP matching neither the whitelist nor `exempt_ips` is denied; otherwise a
+`blacklist` hit is denied. Both denials answer `403 Forbidden` with
+`Forbidden` before body buffering. The client IP is the request's peer
+address; a request without one is not attributed, the gate does not run, and
+detection still screens it. A passed request gets an
+`IpGateDecision { is_whitelisted, is_exempt }` inserted into its request
+extensions so downstream handlers can read the skip state.
+
+**exempt_ips vs whitelist.** `exempt_ips` is noise reduction for
+known-friendly automation (monitoring probes, VPN egress, a partner's
+server), not immunity: it sets the same skip state a whitelist match sets but
+never adds a deny path and never opens the whitelist gate. The blacklist,
+route rules, and detection still apply to exempt IPs - an attack payload from
+an exempt IP is still `403 Suspicious activity detected`. The Rust family
+ships no rate limiter, user-agent filter, cloud-provider blocker, or
+violation counter yet; a stage that lands later must skip exactly what the
+reference skips for a whitelist match (`is_whitelisted || is_exempt`) and
+never skip detection.
+
 ### Responses
 
 | Situation | Status | Body |
 |---|---|---|
+| The IP gate denies the client IP | `403 Forbidden` | `Forbidden` |
 | Engine flags a view | `403 Forbidden` | `Suspicious activity detected` |
 | Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
 | Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
@@ -119,11 +158,15 @@ Re-exported refusal message bodies:
 | Constant | Value |
 |---|---|
 | `BLOCKED_MESSAGE` | `"Suspicious activity detected"` |
+| `FORBIDDEN_MESSAGE` | `"Forbidden"` |
 | `OVERSIZE_MESSAGE` | `"Payload too large"` |
 | `FAILURE_MESSAGE` | `"Security check failed"` |
 
 ### Engine re-exports
 
 `DetectConfig`, `DetectVerdict`, and `Threat` are re-exported from
-`guard_core_engine::detect`. A `DetectVerdict` carries `is_threat`, a
+`guard_core_engine::detect`.
+
+`IpGateConfig`, `IpGateDecision`, `IpGateDenial`, `IpGateError`, and
+`IpGateVerdict` are re-exported from `guard_core_engine::ip_gate`. A `DetectVerdict` carries `is_threat`, a
 `threat_score`, and the list of `Threat` findings (regex or semantic).

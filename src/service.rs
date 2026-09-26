@@ -5,10 +5,11 @@ use crate::response;
 use actix_web::body::MessageBody;
 use actix_web::dev::{Payload, Service, ServiceRequest, ServiceResponse};
 use actix_web::http::header;
-use actix_web::{Error, HttpRequest};
+use actix_web::{Error, HttpMessage, HttpRequest};
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use guard_core_engine::body_scan::extract_body_scan_values;
+use guard_core_engine::ip_gate::IpGateVerdict;
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
@@ -114,6 +115,13 @@ where
         let transform = self.transform.clone();
         Box::pin(async move {
             let (request, payload) = request.into_parts();
+
+            // The IP gate runs before anything else: a denied IP must not
+            // cost a body buffer, and detection still scans whatever passes.
+            if let Some(response) = enforce_ip_gate(&request, &transform) {
+                return Ok(response);
+            }
+
             let buffered = match buffer_body(payload, transform.body_cap()).await {
                 Ok(buffered) => buffered,
                 Err(BufferFailure::TooLarge) => return Ok(response::oversize(request)),
@@ -136,6 +144,27 @@ where
                 ScanOutcome::Failed => Ok(response::failure(request)),
             }
         })
+    }
+}
+
+/// Apply the configured IP gate to the request.
+///
+/// Returns the `403 Forbidden` response when the gate denies the request IP
+/// (the request's peer address). A passed request gets the gate's
+/// [`IpGateDecision`] inserted into the request extensions (the family-local
+/// skip state, the equivalent of the reference engine's `state.is_whitelisted`
+/// / `state.is_exempt`) so downstream handlers can read it. Without a gate or
+/// without a peer address the request is not attributed: the gate does not
+/// run, and nothing is inserted.
+fn enforce_ip_gate(request: &HttpRequest, transform: &GuardTransform) -> Option<ServiceResponse> {
+    let gate = transform.ip_gate()?;
+    let peer = request.peer_addr()?;
+    match gate.evaluate(peer.ip()) {
+        IpGateVerdict::Allowed(decision) => {
+            request.extensions_mut().insert(decision);
+            None
+        }
+        IpGateVerdict::Denied(_) => Some(response::forbidden(request.clone())),
     }
 }
 
@@ -257,7 +286,7 @@ fn is_excluded_header(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BLOCKED_MESSAGE, FAILURE_MESSAGE, default_config};
+    use crate::{BLOCKED_MESSAGE, FAILURE_MESSAGE, FORBIDDEN_MESSAGE, default_config};
     use actix_web::body::MessageBody;
     use actix_web::dev::Transform;
     use actix_web::error::PayloadError;
@@ -480,6 +509,219 @@ mod tests {
         for name in ["cookie", "authorization", "content-type", "x-api-key"] {
             assert!(!is_excluded_header(name), "{name} should be scanned");
         }
+    }
+
+    // --- the global IP gate (exempt_ips contract checklist) ---
+
+    use guard_core_engine::ip_gate::IpGateDecision;
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    /// The empty list, typed so the `new` calls stay inferable.
+    const NIL: [&str; 0] = [];
+
+    /// The checklist gate: a blacklisted exact IP and a blacklisted /24
+    /// (192.0.2.x), an exempt exact IP and an exempt /28 (198.51.100.x), all
+    /// disjoint.
+    fn checklist_gate() -> crate::IpGateConfig {
+        crate::IpGateConfig::new(
+            NIL,
+            ["203.0.113.9", "192.0.2.0/24"],
+            ["198.51.100.7", "198.51.100.16/28"],
+        )
+        .expect("valid lists")
+    }
+
+    /// The downstream handler's view: the skip state in the request
+    /// extensions, or `gate=off` when none was inserted.
+    fn handler_verdict(request: &HttpRequest) -> String {
+        match request.extensions().get::<IpGateDecision>().copied() {
+            Some(decision) => format!(
+                "gate=on wh={} ex={}",
+                decision.is_whitelisted, decision.is_exempt
+            ),
+            None => "gate=off".to_owned(),
+        }
+    }
+
+    fn gate_layer(gate: crate::IpGateConfig) -> GuardTransform {
+        GuardTransform::new(default_config()).with_ip_gate(gate)
+    }
+
+    fn attributed(uri: &str, ip: &str) -> ServiceRequest {
+        let peer = std::net::SocketAddr::new(IpAddr::from_str(ip).unwrap(), 45_000);
+        TestRequest::get().uri(uri).peer_addr(peer).to_srv_request()
+    }
+
+    #[actix_web::test]
+    async fn blacklisted_ip_is_denied_with_the_forbidden_body() {
+        let guard = guarded(gate_layer(checklist_gate())).await;
+        let response = guard
+            .call(attributed("/hello", "203.0.113.9"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(body_text(response), FORBIDDEN_MESSAGE);
+
+        // The blacklisted /24 denies its whole range.
+        let guard = guarded(gate_layer(checklist_gate())).await;
+        let response = guard
+            .call(attributed("/hello", "192.0.2.77"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(body_text(response), FORBIDDEN_MESSAGE);
+    }
+
+    #[actix_web::test]
+    async fn exempt_exact_and_cidr_ips_pass_with_the_skip_state_set() {
+        // Checklist: exemption is observable behavior for the exact entry and
+        // the CIDR member alike; the Rust family has no rate limiter yet, so
+        // "skips rate limiting" is pinned at the flag level the contract
+        // defines (the same state a whitelist match sets).
+        let guard = guarded(gate_layer(checklist_gate())).await;
+        let response = guard
+            .call(attributed("/hello", "198.51.100.7"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(
+            handler_verdict(response.request()),
+            "gate=on wh=false ex=true"
+        );
+
+        let guard = guarded(gate_layer(checklist_gate())).await;
+        let response = guard
+            .call(attributed("/hello", "198.51.100.20"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(
+            handler_verdict(response.request()),
+            "gate=on wh=false ex=true"
+        );
+    }
+
+    #[actix_web::test]
+    async fn exempt_ip_on_the_blacklist_is_still_denied() {
+        let gate =
+            crate::IpGateConfig::new(NIL, ["198.51.100.7"], ["198.51.100.7"]).expect("valid lists");
+        let guard = guarded(gate_layer(gate)).await;
+        let response = guard
+            .call(attributed("/hello", "198.51.100.7"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(body_text(response), FORBIDDEN_MESSAGE);
+    }
+
+    #[actix_web::test]
+    async fn exemption_never_opens_a_restrictive_whitelist() {
+        let gate =
+            crate::IpGateConfig::new(["192.0.2.1"], NIL, ["198.51.100.7"]).expect("valid lists");
+        let guard = guarded(gate_layer(gate)).await;
+        let response = guard
+            .call(attributed("/hello", "198.51.100.7"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(body_text(response), FORBIDDEN_MESSAGE);
+
+        // An exempt-only config adds no deny path of its own: with the
+        // whitelist empty, every IP passes, exempt or not.
+        let exempt_only =
+            crate::IpGateConfig::new(NIL, NIL, ["198.51.100.7"]).expect("valid lists");
+        let guard = guarded(gate_layer(exempt_only)).await;
+        let response = guard
+            .call(attributed("/hello", "192.0.2.8"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(
+            handler_verdict(response.request()),
+            "gate=on wh=false ex=false"
+        );
+    }
+
+    #[actix_web::test]
+    async fn whitelist_match_sets_both_flags() {
+        let gate =
+            crate::IpGateConfig::new(["198.51.100.7", "198.51.100.30"], NIL, ["198.51.100.7"])
+                .expect("valid lists");
+        let guard = guarded(gate_layer(gate)).await;
+        let response = guard
+            .call(attributed("/hello", "198.51.100.7"))
+            .await
+            .expect("response");
+        assert_eq!(
+            handler_verdict(response.request()),
+            "gate=on wh=true ex=true"
+        );
+
+        // A whitelist member outside exempt_ips: plain whitelist skip state.
+        let gate = crate::IpGateConfig::new(["198.51.100.7", "198.51.100.30"], NIL, NIL)
+            .expect("valid lists");
+        let guard = guarded(gate_layer(gate)).await;
+        let response = guard
+            .call(attributed("/hello", "198.51.100.30"))
+            .await
+            .expect("response");
+        assert_eq!(
+            handler_verdict(response.request()),
+            "gate=on wh=true ex=false"
+        );
+    }
+
+    #[actix_web::test]
+    async fn an_attack_from_an_exempt_ip_is_still_blocked_by_detection() {
+        // Checklist: penetration detection still applies to exempt IPs.
+        let guard = guarded(gate_layer(checklist_gate())).await;
+        let peer = std::net::SocketAddr::new(IpAddr::from_str("198.51.100.7").unwrap(), 45_000);
+        let request = TestRequest::get()
+            .uri("/files/../../etc/passwd")
+            .peer_addr(peer)
+            .to_srv_request();
+        let response = guard.call(request).await.expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(body_text(response), BLOCKED_MESSAGE);
+    }
+
+    #[actix_web::test]
+    async fn without_a_peer_address_the_gate_is_inert_and_detection_still_applies() {
+        let guard = guarded(gate_layer(checklist_gate())).await;
+        let request = TestRequest::get().uri("/hello").to_srv_request();
+        let response = guard.call(request).await.expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(handler_verdict(response.request()), "gate=off");
+
+        // Not attributed does not mean unscreened: detection still scans.
+        let guard = guarded(gate_layer(checklist_gate())).await;
+        let request = TestRequest::get()
+            .uri("/files/../../etc/passwd")
+            .to_srv_request();
+        let response = guard.call(request).await.expect("response");
+        assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(body_text(response), BLOCKED_MESSAGE);
+    }
+
+    #[test]
+    fn invalid_exempt_entry_fails_closed_at_config_time() {
+        let error = crate::IpGateConfig::new(NIL, NIL, ["not-an-ip"]).unwrap_err();
+        assert_eq!(error.list, "exempt_ips");
+        assert_eq!(error.entry, "not-an-ip");
+    }
+
+    #[test]
+    fn ipv4_mapped_peer_matches_v4_entries() {
+        // Checklist: IPv4-mapped parity, same matching semantics as the
+        // whitelist matcher.
+        let mapped = IpAddr::from_str("::ffff:198.51.100.7").expect("mapped address");
+        let gate = crate::IpGateConfig::new(["198.51.100.0/28"], NIL, ["198.51.100.7"])
+            .expect("valid lists");
+        assert!(matches!(
+            gate.evaluate(mapped),
+            IpGateVerdict::Allowed(decision) if decision.is_exempt
+        ));
     }
 
     /// A body that yields one frame, then errors.
