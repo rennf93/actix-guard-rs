@@ -66,7 +66,7 @@
 //! | Situation | Status | Body |
 //! |---|---|---|
 //! | The IP gate denies the client IP (blacklisted, or a non-empty whitelist matches neither the IP nor an exemption) | `403 Forbidden` | `Forbidden` |
-//! | Engine flags a view | `403 Forbidden` | `Suspicious activity detected` |
+//! | Engine flags a view | `400 Bad Request` | `Suspicious activity detected` |
 //! | Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
 //! | Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
 //!
@@ -118,7 +118,7 @@
 //!     .uri("/files/../../etc/passwd")
 //!     .to_request();
 //! let response = test::call_service(&service, request).await;
-//! assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+//! assert_eq!(response.status(), actix_web::http::StatusCode::BAD_REQUEST);
 //! # });
 //! ```
 

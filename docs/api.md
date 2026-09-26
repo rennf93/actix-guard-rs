@@ -131,7 +131,7 @@ known-friendly automation (monitoring probes, VPN egress, a partner's
 server), not immunity: it sets the same skip state a whitelist match sets but
 never adds a deny path and never opens the whitelist gate. The blacklist,
 route rules, and detection still apply to exempt IPs - an attack payload from
-an exempt IP is still `403 Suspicious activity detected`. The Rust family
+an exempt IP is still `400 Suspicious activity detected`. The Rust family
 ships no rate limiter, user-agent filter, cloud-provider blocker, or
 violation counter yet; a stage that lands later must skip exactly what the
 reference skips for a whitelist match (`is_whitelisted || is_exempt`) and
@@ -142,7 +142,7 @@ never skip detection.
 | Situation | Status | Body |
 |---|---|---|
 | The IP gate denies the client IP | `403 Forbidden` | `Forbidden` |
-| Engine flags a view | `403 Forbidden` | `Suspicious activity detected` |
+| Engine flags a view | `400 Bad Request` | `Suspicious activity detected` |
 | Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
 | Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
 

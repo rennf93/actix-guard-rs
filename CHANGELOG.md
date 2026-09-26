@@ -4,6 +4,10 @@ All notable changes to this project.
 
 ## [Unreleased]
 
+### Changed
+
+- Detection blocks answer `400 Bad Request` (`Suspicious activity detected`) instead of `403 Forbidden`, matching the reference suspicious-activity stage's status and the rest of the Rust family (the IP gate's `403 Forbidden` and the fail-secure `500` are unchanged)
+
 ## [1.1.0] - 2026-09-26
 
 ### Added

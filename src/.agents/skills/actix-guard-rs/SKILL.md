@@ -40,7 +40,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
 ## Behavior Contracts
 
-- Block: `403` + `Suspicious activity detected`.
+- Block: `400` + `Suspicious activity detected`.
 - Oversize body: `413` + `Payload too large`. Cap defaults to `max_full_scan_bytes`; oversize is rejected, never passed unscanned.
 - Body read error or engine panic: `500` + `Security check failed`. Fail-secure, unlike the TypeScript adapters which fail open.
 - `EXCLUDED_HEADERS` (never scanned): `host`, `user-agent`, `accept`, `accept-encoding`, `connection`, `origin`, `referer`, plus every `sec-*` header. Mirrors `guard-core-ts` and `tower-guard-rs`.

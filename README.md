@@ -54,7 +54,7 @@ The HTTP method is not fed to the engine: the engine's `detect(content, context,
 
 | Situation | Status | Body |
 |---|---|---|
-| Engine flags a view | `403 Forbidden` | `Suspicious activity detected` |
+| Engine flags a view | `400 Bad Request` | `Suspicious activity detected` |
 | Body exceeds the cap | `413 Payload Too Large` | `Payload too large` |
 | Body read error or engine panic | `500 Internal Server Error` | `Security check failed` |
 

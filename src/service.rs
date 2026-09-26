@@ -352,7 +352,7 @@ mod tests {
             .uri("/files/../../etc/passwd")
             .to_srv_request();
         let response = guard.call(request).await.expect("response");
-        assert_eq!(response.status(), 403);
+        assert_eq!(response.status(), 400);
         assert_eq!(body_text(response), BLOCKED_MESSAGE);
     }
 
@@ -400,7 +400,7 @@ mod tests {
         let request = post_request("application/x-www-form-urlencoded", b"q=1+OR+1%3D1");
         assert_eq!(
             status_for(request).await,
-            actix_web::http::StatusCode::FORBIDDEN
+            actix_web::http::StatusCode::BAD_REQUEST
         );
     }
 
@@ -409,7 +409,7 @@ mod tests {
         let request = post_request("application/x-www-form-urlencoded", b"q=\\default");
         assert_eq!(
             status_for(request).await,
-            actix_web::http::StatusCode::FORBIDDEN,
+            actix_web::http::StatusCode::BAD_REQUEST,
             "\\default in a form field must stay a recon probe"
         );
     }
@@ -440,7 +440,7 @@ mod tests {
         );
         assert_eq!(
             status_for(request).await,
-            actix_web::http::StatusCode::FORBIDDEN
+            actix_web::http::StatusCode::BAD_REQUEST
         );
     }
 
@@ -452,7 +452,7 @@ mod tests {
         );
         assert_eq!(
             status_for(request).await,
-            actix_web::http::StatusCode::FORBIDDEN
+            actix_web::http::StatusCode::BAD_REQUEST
         );
     }
 
@@ -461,7 +461,7 @@ mod tests {
         let request = post_request("application/json", br#"{"$where": "1 OR 1=1"}"#);
         assert_eq!(
             status_for(request).await,
-            actix_web::http::StatusCode::FORBIDDEN
+            actix_web::http::StatusCode::BAD_REQUEST
         );
     }
 
@@ -682,7 +682,7 @@ mod tests {
             .peer_addr(peer)
             .to_srv_request();
         let response = guard.call(request).await.expect("response");
-        assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), actix_web::http::StatusCode::BAD_REQUEST);
         assert_eq!(body_text(response), BLOCKED_MESSAGE);
     }
 
@@ -700,7 +700,7 @@ mod tests {
             .uri("/files/../../etc/passwd")
             .to_srv_request();
         let response = guard.call(request).await.expect("response");
-        assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), actix_web::http::StatusCode::BAD_REQUEST);
         assert_eq!(body_text(response), BLOCKED_MESSAGE);
     }
 

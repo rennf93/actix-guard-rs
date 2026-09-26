@@ -36,8 +36,8 @@ configuration.
 |---|---|---|
 | `GET /health` | excluded | `200 ok` |
 | `GET /` | general | `200`, greeting text |
-| `GET /search?q=...` | general | `200`, or `403` on a threat |
-| `POST /echo` | general | echoes the body; `403`/`413` from the guard |
+| `GET /search?q=...` | general | `200`, or `400` on a threat |
+| `POST /echo` | general | echoes the body; `400`/`413` from the guard |
 | `GET /admin/stats` | admin (strict) | `200 stats` |
 
 ## Not demonstrated (engine surface)
@@ -72,7 +72,7 @@ GUARD_BODY_CAP=65536 APP_ADDR=127.0.0.1:8080 target/debug/actix-guard-advanced-a
 |---|---|
 | `GET /health` | `200` |
 | `GET /admin/stats` | `200` |
-| `GET /search?q=<script>alert(1)</script>` | `403`, body `Suspicious activity detected` |
+| `GET /search?q=<script>alert(1)</script>` | `400`, body `Suspicious activity detected` |
 | `POST /echo` with a body over `GUARD_BODY_CAP` | `413`, body `Payload too large` |
 | `POST /echo` with a small body | `200`, body echoed |
 

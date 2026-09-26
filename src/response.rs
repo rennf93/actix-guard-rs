@@ -5,7 +5,7 @@ use actix_web::http::StatusCode;
 use actix_web::http::header::CONTENT_TYPE;
 use actix_web::{HttpRequest, HttpResponse};
 
-/// Detail message carried by the `403 Forbidden` block response.
+/// Detail message carried by the `400 Bad Request` block response.
 pub const BLOCKED_MESSAGE: &str = "Suspicious activity detected";
 
 /// Detail message carried by the IP gate's `403 Forbidden` response.
@@ -18,7 +18,7 @@ pub const OVERSIZE_MESSAGE: &str = "Payload too large";
 pub const FAILURE_MESSAGE: &str = "Security check failed";
 
 pub(crate) fn blocked(request: HttpRequest) -> ServiceResponse {
-    plain_text(request, StatusCode::FORBIDDEN, BLOCKED_MESSAGE)
+    plain_text(request, StatusCode::BAD_REQUEST, BLOCKED_MESSAGE)
 }
 
 pub(crate) fn forbidden(request: HttpRequest) -> ServiceResponse {
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn blocked_response_shape() {
         let response = blocked(test_request());
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             response
                 .headers()

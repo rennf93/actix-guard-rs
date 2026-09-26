@@ -52,7 +52,7 @@ curl -i 'http://127.0.0.1:8080/?cmd=$(whoami)'
 ```
 
 The first request answers `200 OK`; the second is blocked by the engine with
-`403 Forbidden` and a `Suspicious activity detected` body.
+`400 Bad Request` and a `Suspicious activity detected` body.
 
 ## Building from source
 
